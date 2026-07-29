@@ -3,9 +3,11 @@ import json
 import base64
 import mimetypes
 from pathlib import Path
+from io import BytesIO
 import httpx
 import asyncio
 from typing import Optional
+from PIL import Image
 from ..config import settings
 from ..database import get_db
 
@@ -57,23 +59,67 @@ def _image_to_data_uri(file_path: str) -> str:
     return f"data:{mime};base64,{b64}"
 
 
+def compress_image_for_ai(file_path: str) -> str:
+    """压缩图片供AI分析：最长边压缩到设定像素，转为JPEG质量85，返回base64 data URI。
+    如果图片已经较小（<500KB）则直接读取为base64不压缩。"""
+    path = Path(file_path)
+    if not path.exists():
+        return ""
+
+    # 如果图片已经较小（<500KB），直接读取为base64不压缩
+    file_size = path.stat().st_size
+    if file_size < 500 * 1024:
+        return _image_to_data_uri(file_path)
+
+    try:
+        img = Image.open(str(path))
+        # 最长边压缩
+        max_edge = settings.ai_image_max_long_edge
+        w, h = img.size
+        if max(w, h) > max_edge:
+            if w >= h:
+                new_w = max_edge
+                new_h = int(h * max_edge / w)
+            else:
+                new_h = max_edge
+                new_w = int(w * max_edge / h)
+            img = img.resize((new_w, new_h), Image.LANCZOS)
+        # 转为RGB（JPEG不支持透明通道）
+        if img.mode in ("RGBA", "P", "LA"):
+            img = img.convert("RGB")
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=settings.ai_image_quality)
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        return f"data:image/jpeg;base64,{b64}"
+    except Exception:
+        # 压缩失败则回退到直接读取
+        return _image_to_data_uri(file_path)
+
+
 def build_analysis_input(module_snapshots: list[dict], analysis_request: str, asset_paths: list[str]) -> list[dict]:
     """构建AI输入消息内容"""
     content = []
+    image_count = 0
+    max_images = settings.ai_max_images
 
     for snap in module_snapshots:
         content.append({
             "type": "text",
             "text": f"【模块{snap['order_index']+1}：{snap['module_name']}】\n{snap['text_content'] or '（无文字内容）'}"
         })
-        # 添加该模块的图片（转为 base64 data URI）
+        # 添加该模块的图片（压缩后转为 base64 data URI），限制总数量
         for asset_path in snap.get("assets", []):
-            data_uri = _image_to_data_uri(asset_path)
+            if image_count >= max_images:
+                break
+            data_uri = compress_image_for_ai(asset_path)
             if data_uri:
                 content.append({
                     "type": "image_url",
                     "image_url": {"url": data_uri}
                 })
+                image_count += 1
+        if image_count >= max_images:
+            break
 
     if analysis_request:
         content.append({
@@ -133,6 +179,15 @@ async def call_ai(module_snapshots: list[dict], analysis_request: str) -> dict:
 
         # 尝试解析JSON
         result_json = parse_ai_result(raw_text)
+
+        if result_json is None:
+            # JSON解析失败，返回警告但保留原文
+            return {
+                "result_json": None,
+                "raw_result": raw_text,
+                "error": None,
+                "warning": "AI返回结果格式不完整",
+            }
 
         return {
             "result_json": result_json,

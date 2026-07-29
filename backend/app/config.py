@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     ai_model: str = ""
     ai_timeout: int = 120  # 秒
     ai_max_retries: int = 1
+    ai_max_images: int = 16
+    ai_image_max_long_edge: int = 2048
+    ai_image_quality: int = 85
 
     # 备份配置
     max_auto_backups: int = 10

@@ -329,16 +329,13 @@ async function startAnalysis() {
     showToast('请先选择模块', 'warning')
     return
   }
+  if (analyzing.value) return
   analyzing.value = true
   try {
     const res = await analysisApi.create(selectedModules.value, analysisRequest.value, '')
     const data = res.data
-    if (data.status === 'failed') {
-      analyzing.value = false
-      showToast('分析失败：' + (data.error_message || '未知错误'), 'error')
-      return
-    }
-    showToast('分析完成', 'success')
+    // 后端返回 202 + { id, status: "pending" }，不再等待分析完成，立即跳转由 ResultView 轮询
+    showToast('分析已提交，正在处理中...', 'success')
     router.push(`/result/${data.id}`)
   } catch (e) {
     analyzing.value = false

@@ -134,7 +134,8 @@ class SettingsUpdate(BaseModel):
 
 class SettingsOut(BaseModel):
     ai_api_url: str
-    ai_api_key: str
+    has_api_key: bool
+    masked_api_key: str
     ai_model: str
     backup_location: str
     font_size: str

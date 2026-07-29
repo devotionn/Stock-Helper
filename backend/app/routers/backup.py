@@ -7,7 +7,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from fastapi import APIRouter, UploadFile, File, HTTPException
-from ..database import get_db, get_connection
+from ..database import get_db, get_connection, init_database
 from ..config import settings
 from ..schemas import BackupResult
 
@@ -100,13 +100,7 @@ def create_backup():
     except Exception as e:
         if temp_path.exists():
             temp_path.unlink()
-        return BackupResult(
-            success=False,
-            path="",
-            file_count=0,
-            total_size=0,
-            message=f"备份失败: {str(e)}",
-        )
+        raise HTTPException(status_code=500, detail=f"备份失败: {str(e)}")
 
 
 @router.get("", response_model=list)
@@ -136,41 +130,101 @@ async def restore_backup(file: UploadFile = File(...)):
     temp_zip = settings.temp_dir / "restore.zip"
     temp_zip.write_bytes(data)
 
+    extract_dir = settings.temp_dir / "restore_extract"
+    assets_temp_dir = settings.temp_dir / "assets_pre_restore"
+
+    MAX_TOTAL_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
+    MAX_FILE_COUNT = 100000
+
     try:
         with zipfile.ZipFile(temp_zip, "r") as zf:
             names = zf.namelist()
             if "manifest.json" not in names or "database.db" not in names:
                 raise HTTPException(status_code=400, detail="无效的备份文件")
 
-            # 先创建恢复前备份
-            pre_restore_backup = create_backup()
-            if not pre_restore_backup.success:
-                raise HTTPException(status_code=500, detail="恢复前备份失败，已中止恢复")
+            # ZIP路径穿越防护
+            for name in names:
+                if ".." in name or name.startswith("/"):
+                    raise HTTPException(status_code=400, detail=f"非法文件路径: {name}")
 
-            # 解压数据库
-            extract_dir = settings.temp_dir / "restore_extract"
+            # 解压到临时目录
             if extract_dir.exists():
-                shutil.rmtree(extract_dir)
-            extract_dir.mkdir()
+                shutil.rmtree(extract_dir, ignore_errors=True)
+            extract_dir.mkdir(parents=True)
 
-            zf.extract("database.db", extract_dir)
+            total_size = 0
+            file_count = 0
+            for name in names:
+                zf.extract(name, extract_dir)
+                extracted_path = extract_dir / name
+                if extracted_path.is_file():
+                    total_size += extracted_path.stat().st_size
+                    file_count += 1
+                    if total_size > MAX_TOTAL_SIZE:
+                        raise HTTPException(status_code=400, detail="解压后总大小超过2GB限制")
+                    if file_count > MAX_FILE_COUNT:
+                        raise HTTPException(status_code=400, detail="解压后文件数超过100000限制")
 
-            # 替换数据库
-            shutil.copy2(extract_dir / "database.db", settings.db_path)
+            # 校验manifest
+            manifest_path = extract_dir / "manifest.json"
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+            if not isinstance(manifest, dict) or "schema_version" not in manifest:
+                raise HTTPException(status_code=400, detail="manifest.json格式无效")
 
-            # 解压图片
-            if any(n.startswith("assets/") for n in names):
-                for name in names:
-                    if name.startswith("assets/") and not name.endswith("/"):
-                        rel = name[len("assets/"):]
-                        target = settings.assets_dir / rel
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        with zf.open(name) as src, open(target, "wb") as dst:
-                            shutil.copyfileobj(src, dst)
+            # SQLite完整性校验
+            backup_db_path = extract_dir / "database.db"
+            integrity_conn = sqlite3.connect(str(backup_db_path))
+            try:
+                integrity_result = integrity_conn.execute("PRAGMA integrity_check").fetchone()
+            finally:
+                integrity_conn.close()
+            if integrity_result[0] != "ok":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"备份数据库完整性校验失败: {integrity_result[0]}",
+                )
 
-            shutil.rmtree(extract_dir, ignore_errors=True)
+        # 创建恢复前备份（在zip关闭后执行，避免占用句柄）
+        pre_restore_backup = create_backup()
+
+        # 原子替换：移动当前assets到临时目录
+        if assets_temp_dir.exists():
+            shutil.rmtree(assets_temp_dir, ignore_errors=True)
+        if settings.assets_dir.exists():
+            shutil.move(str(settings.assets_dir), str(assets_temp_dir))
+        settings.assets_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            # 将备份assets复制到正式目录
+            backup_assets_dir = extract_dir / "assets"
+            if backup_assets_dir.exists():
+                shutil.copytree(
+                    str(backup_assets_dir), str(settings.assets_dir), dirs_exist_ok=True
+                )
+
+            # 替换数据库文件
+            shutil.copy2(backup_db_path, settings.db_path)
+            # 删除可能的WAL和SHM文件（属于旧数据库）
+            for suffix in ["-wal", "-shm"]:
+                wal_path = Path(str(settings.db_path) + suffix)
+                if wal_path.exists():
+                    wal_path.unlink()
+
+            # 重新初始化数据库（应用迁移）
+            init_database()
+        except Exception as e:
+            # 回滚：恢复原assets
+            if settings.assets_dir.exists():
+                shutil.rmtree(settings.assets_dir, ignore_errors=True)
+            shutil.move(str(assets_temp_dir), str(settings.assets_dir))
+            raise HTTPException(status_code=500, detail=f"恢复失败，已回滚: {str(e)}")
+
+        # 清理临时assets备份
+        shutil.rmtree(assets_temp_dir, ignore_errors=True)
 
         return {"message": "恢复成功", "pre_restore_backup": pre_restore_backup.path}
+
     except HTTPException:
         raise
     except Exception as e:
@@ -178,3 +232,5 @@ async def restore_backup(file: UploadFile = File(...)):
     finally:
         if temp_zip.exists():
             temp_zip.unlink()
+        if extract_dir.exists():
+            shutil.rmtree(extract_dir, ignore_errors=True)

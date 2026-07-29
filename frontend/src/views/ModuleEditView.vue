@@ -28,7 +28,7 @@
 
       <!-- 图片管理 -->
       <div class="form-group">
-        <label class="form-label">图片（支持上传或直接 Ctrl+V 粘贴截图）</label>
+        <label class="form-label">图片（支持上传或直接{{ pasteTip }}）</label>
         <div class="upload-row">
           <button class="btn btn-primary" :disabled="uploading" @click="triggerUpload">
             {{ uploading ? '上传中...' : '上传图片' }}
@@ -36,12 +36,12 @@
           <input
             ref="fileInput"
             type="file"
-            accept="image/*"
+            accept="image/jpeg,image/png,image/webp,image/gif,image/bmp"
             multiple
             style="display:none"
             @change="onFileChange"
           />
-          <span class="text-secondary">可多选，也可在此页面按 Ctrl+V 粘贴截图</span>
+          <span class="text-secondary">支持 JPG/PNG/WebP/GIF/BMP，可多选，也可在此页面{{ pasteTip }}</span>
         </div>
 
         <div v-if="images.length" class="image-grid">
@@ -75,7 +75,7 @@
           </div>
         </div>
         <div v-else class="empty-state">
-          暂无图片，点击上方“上传图片”按钮，或直接按 Ctrl+V 粘贴截图
+          暂无图片，点击上方“上传图片”按钮，或直接{{ pasteTip }}
         </div>
       </div>
 
@@ -116,6 +116,9 @@ const props = defineProps({
 
 const router = useRouter()
 const showToast = inject('toast')
+
+const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0
+const pasteTip = isMac ? '按 Command + V 粘贴截图' : '按 Ctrl + V 粘贴截图'
 
 const moduleId = computed(() => Number(props.id))
 
@@ -231,16 +234,23 @@ async function onFileChange(e) {
 
 async function uploadFiles(fileList) {
   uploading.value = true
+  let successCount = 0
+  const failedFiles = []
   try {
     for (const file of fileList) {
       try {
         const { data } = await modulesApi.uploadImage(moduleId.value, file)
         images.value.push(data)
+        successCount++
       } catch (e) {
-        showToast(`图片“${file.name}”上传失败`, 'error')
+        failedFiles.push(file.name)
       }
     }
-    showToast('图片上传完成', 'success')
+    let msg = `成功上传${successCount}张`
+    if (failedFiles.length > 0) {
+      msg += `，失败${failedFiles.length}张：${failedFiles.join('、')}`
+    }
+    showToast(msg, failedFiles.length > 0 ? 'warning' : 'success')
   } finally {
     uploading.value = false
   }
@@ -310,15 +320,36 @@ function goBack() {
   router.push('/')
 }
 
+// ---- 页面卸载前保存 ----
+function handleBeforeUnload() {
+  if (textContent.value !== lastSavedText && !saving.value) {
+    // 使用 fetch keepalive 确保页面卸载时请求仍能发出
+    try {
+      fetch(`/api/modules/${moduleId.value}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text_content: textContent.value, revision: revision.value }),
+        keepalive: true,
+      })
+    } catch {}
+  }
+}
+
 // ---- 生命周期 ----
 onMounted(() => {
   loadAll()
   window.addEventListener('paste', handlePaste)
+  window.addEventListener('beforeunload', handleBeforeUnload)
 })
 
 onBeforeUnmount(() => {
   if (autoSaveTimer) clearTimeout(autoSaveTimer)
   window.removeEventListener('paste', handlePaste)
+  window.removeEventListener('beforeunload', handleBeforeUnload)
+  // 离开页面前如有未保存内容，执行一次保存（不等待结果）
+  if (textContent.value !== lastSavedText && !saving.value) {
+    doSave(true)
+  }
 })
 </script>
 

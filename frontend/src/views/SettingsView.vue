@@ -17,7 +17,7 @@
         </div>
         <div class="form-group">
           <label class="form-label">API密钥</label>
-          <input type="password" class="form-input" v-model="form.ai_api_key" placeholder="输入API密钥" />
+          <input type="password" class="form-input" v-model="apiKeyInput" :placeholder="apiKeyPlaceholder" />
         </div>
         <div class="form-group">
           <label class="form-label">模型名称</label>
@@ -62,8 +62,8 @@
           {{ backingUp ? '正在备份...' : '一键备份' }}
         </button>
 
-        <div v-if="backupResult" class="backup-result">
-          <div class="backup-result-title">备份结果</div>
+        <div v-if="backupResult" class="backup-result" :class="{ 'backup-result-error': backupResult.success === false }">
+          <div class="backup-result-title" :class="{ 'backup-result-title-error': backupResult.success === false }">备份结果</div>
           <div>{{ backupResult.message }}</div>
           <div v-if="backupResult.file_count" class="text-secondary mt-2">
             文件数：{{ backupResult.file_count }} | 大小：{{ formatSize(backupResult.total_size) }}
@@ -115,7 +115,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, inject } from 'vue'
+import { ref, reactive, computed, onMounted, inject } from 'vue'
 import { settingsApi, backupApi } from '../api'
 
 const showToast = inject('toast')
@@ -123,10 +123,19 @@ const showToast = inject('toast')
 const loading = ref(true)
 const form = reactive({
   ai_api_url: '',
-  ai_api_key: '',
   ai_model: '',
   backup_location: '',
   font_size: '18',
+})
+
+const apiKeyInput = ref('')
+const hasApiKey = ref(false)
+const maskedApiKey = ref('')
+const apiKeyPlaceholder = computed(() => {
+  if (hasApiKey.value) {
+    return `已配置（当前: ${maskedApiKey.value}），留空则不修改`
+  }
+  return '请输入API密钥'
 })
 
 const savingAI = ref(false)
@@ -146,7 +155,9 @@ async function loadSettings() {
   try {
     const { data } = await settingsApi.get()
     form.ai_api_url = data.ai_api_url || ''
-    form.ai_api_key = data.ai_api_key || ''
+    hasApiKey.value = !!data.has_api_key
+    maskedApiKey.value = data.masked_api_key || ''
+    apiKeyInput.value = ''
     form.ai_model = data.ai_model || ''
     form.backup_location = data.backup_location || ''
     form.font_size = data.font_size || '18'
@@ -161,12 +172,22 @@ async function loadSettings() {
 async function saveAI() {
   savingAI.value = true
   try {
-    await settingsApi.update({
+    const payload = {
       ai_api_url: form.ai_api_url,
-      ai_api_key: form.ai_api_key,
       ai_model: form.ai_model,
-    })
+    }
+    if (apiKeyInput.value.trim()) {
+      payload.ai_api_key = apiKeyInput.value
+    }
+    await settingsApi.update(payload)
     showToast('AI配置保存成功', 'success')
+    apiKeyInput.value = ''
+    // 刷新脱敏密钥显示
+    try {
+      const { data } = await settingsApi.get()
+      hasApiKey.value = !!data.has_api_key
+      maskedApiKey.value = data.masked_api_key || ''
+    } catch {}
   } catch (e) {
     showToast('保存失败：' + (e.response?.data?.message || e.message), 'error')
   } finally {
@@ -209,8 +230,10 @@ async function createBackup() {
   try {
     const { data } = await backupApi.create()
     backupResult.value = data
-    showToast(data.message || '备份成功', 'success')
-    loadBackupList()
+    const success = data.success !== false
+    const message = data.message || (success ? '备份成功' : '备份失败')
+    showToast(message, success ? 'success' : 'error')
+    if (success) loadBackupList()
   } catch (e) {
     showToast('备份失败：' + (e.response?.data?.message || e.message), 'error')
   } finally {
@@ -325,6 +348,15 @@ onMounted(() => {
   font-weight: 700;
   color: var(--success);
   margin-bottom: 8px;
+}
+
+.backup-result.backup-result-error {
+  background: #fce8e6;
+  border-left-color: var(--danger);
+}
+
+.backup-result-title.backup-result-title-error {
+  color: var(--danger);
 }
 
 .subsection-title {

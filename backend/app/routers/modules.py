@@ -145,6 +145,20 @@ async def upload_module_image(module_id: int, file: UploadFile = File(...)):
             )
             asset_id = cur.lastrowid
 
+        # 检查是否已存在相同(module_id, asset_id)，存在则跳过（防止重复添加）
+        existing_draft = conn.execute(
+            "SELECT order_index FROM draft_assets WHERE module_id=? AND asset_id=?",
+            (module_id, asset_id),
+        ).fetchone()
+        if existing_draft:
+            return AssetOut(
+                id=asset_id, sha256=info["sha256"],
+                original_filename=info["original_filename"],
+                relative_path=info["relative_path"], thumbnail_path=info["thumbnail_path"],
+                file_size=info["file_size"], width=info["width"], height=info["height"],
+                order_index=existing_draft["order_index"], caption="",
+            )
+
         # 获取当前最大order_index
         max_order = conn.execute(
             "SELECT MAX(order_index) FROM draft_assets WHERE module_id=?", (module_id,)
@@ -249,10 +263,15 @@ def save_module_version(module_id: int, body: ModuleVersionCreate):
                 "VALUES (?,?,?,?)",
                 (version_id, img["asset_id"], img["order_index"], img["caption"]),
             )
+        # 重新查询获取真实created_at
+        version_row = conn.execute(
+            "SELECT created_at FROM module_versions WHERE id=?", (version_id,)
+        ).fetchone()
+        created_at = version_row["created_at"] if version_row else ""
         return ModuleVersionOut(
             id=version_id, module_id=module_id,
             text_content=draft["text_content"], source="user",
-            note=body.note, created_at="",
+            note=body.note, created_at=created_at,
             image_count=len(images),
         )
 

@@ -13,7 +13,7 @@
       <button class="btn btn-secondary mb-4" @click="goBack">← 返回组合分析</button>
 
       <!-- 分析中 -->
-      <div v-if="analysis.status === 'running'" class="loading analyzing-loading">
+      <div v-if="analysis.status === 'running' || analysis.status === 'pending'" class="loading analyzing-loading">
         <div class="loading-spinner"></div>
         <div class="analyzing-text">AI正在分析中，请耐心等待...</div>
         <div class="analyzing-sub">分析可能需要30-120秒，页面将自动刷新结果</div>
@@ -29,9 +29,12 @@
       </div>
 
       <!-- 完成 -->
-      <template v-else-if="analysis.status === 'completed'">
+      <template v-else-if="analysis.status === 'completed' || analysis.status === 'completed_with_warning'">
         <!-- 免责声明 -->
         <div class="analysis-warning">⚠️ 本分析仅供参考，不构成投资建议</div>
+        <div v-if="analysis.status === 'completed_with_warning'" class="analysis-warning">
+          ⚠️ 结果格式可能不完整
+        </div>
 
         <!-- 分析信息 -->
         <section class="card">
@@ -151,7 +154,9 @@ function buildResultText() {
 }
 
 function parseResult() {
-  if (!analysis.value || analysis.value.status !== 'completed') return
+  if (!analysis.value) return
+  const status = analysis.value.status
+  if (status !== 'completed' && status !== 'completed_with_warning') return
   const raw = analysis.value.result_json
   if (!raw) {
     useRaw.value = true
@@ -172,7 +177,7 @@ async function fetchAnalysis() {
     const res = await analysisApi.get(id)
     analysis.value = res.data
     parseResult()
-    if (analysis.value.status === 'running') {
+    if (analysis.value.status === 'running' || analysis.value.status === 'pending') {
       startPolling()
     }
   } catch (e) {
@@ -188,11 +193,12 @@ function startPolling() {
     try {
       const res = await analysisApi.get(id)
       analysis.value = res.data
-      if (analysis.value.status === 'completed') {
+      const status = analysis.value.status
+      if (status === 'completed' || status === 'completed_with_warning') {
         stopPolling()
         parseResult()
         showToast('分析已完成', 'success')
-      } else if (analysis.value.status === 'failed') {
+      } else if (status === 'failed') {
         stopPolling()
         showToast('分析失败', 'error')
       }

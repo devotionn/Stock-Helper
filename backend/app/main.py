@@ -38,14 +38,25 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS - 开发环境允许前端dev server访问
+# CORS - 开发环境只允许前端dev server访问；生产环境同源不需要CORS
+# （生产模式 Host=127.0.0.1:8765 时前端与API同源，浏览器不会发起跨域请求）
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """添加安全响应头：所有环境均生效"""
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 # 静态文件：图片访问
 app.mount("/uploads", StaticFiles(directory=str(settings.assets_dir)), name="uploads")

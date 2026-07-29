@@ -34,25 +34,21 @@ def _collect_module_snapshot(conn, module_id: int) -> dict:
     }
 
 
-@router.post("", response_model=AnalysisOut)
-async def create_analysis(body: AnalysisCreate):
-    """创建并启动分析"""
+@router.post("", status_code=202)
+async def create_analysis(body: AnalysisCreate, background_tasks: BackgroundTasks):
+    """创建分析记录并立即返回，AI分析在后台异步执行"""
     if not body.module_ids:
         raise HTTPException(status_code=400, detail="请至少选择一个模块")
 
     module_ids = body.module_ids
     with get_db() as conn:
-        # 创建分析记录
+        # 创建分析记录（pending状态）
         cur = conn.execute(
             "INSERT INTO analyses (combination, combination_name, analysis_request, status) "
-            "VALUES (?, ?, ?, 'running')",
+            "VALUES (?, ?, ?, 'pending')",
             (json.dumps(module_ids), body.combination_name, body.analysis_request),
         )
         analysis_id = cur.lastrowid
-        conn.execute(
-            "UPDATE analyses SET started_at=datetime('now','localtime') WHERE id=?",
-            (analysis_id,),
-        )
 
         # 收集模块快照
         snapshots = []
@@ -66,29 +62,49 @@ async def create_analysis(body: AnalysisCreate):
                 "VALUES (?,?,?,?,?)",
                 (analysis_id, mid, idx, snap["module_name"], snap["text_content"]),
             )
-            # 保存图片快照
+            # 保存图片快照（order_index为模块序号，image_order_index为模块内图片序号）
             images = conn.execute(
                 "SELECT a.id, a.relative_path, a.thumbnail_path FROM draft_assets da "
                 "JOIN assets a ON da.asset_id=a.id "
                 "WHERE da.module_id=? ORDER BY da.order_index", (mid,)
             ).fetchall()
-            for img in images:
+            for img_idx, img in enumerate(images):
                 conn.execute(
-                    "INSERT INTO analysis_assets (analysis_id, module_id, order_index, asset_id, relative_path, thumbnail_path) "
-                    "VALUES (?,?,?,?,?,?)",
-                    (analysis_id, mid, idx, img["id"], img["relative_path"], img["thumbnail_path"]),
+                    "INSERT INTO analysis_assets (analysis_id, module_id, order_index, image_order_index, asset_id, relative_path, thumbnail_path) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (analysis_id, mid, idx, img_idx, img["id"], img["relative_path"], img["thumbnail_path"]),
                 )
             snapshots.append(snap)
 
-    # 调用AI（异步）
-    result = await call_ai(snapshots, body.analysis_request)
+    # 后台异步执行AI分析
+    background_tasks.add_task(_run_analysis_background, analysis_id, snapshots, body.analysis_request)
+
+    return {"id": analysis_id, "status": "pending"}
+
+
+async def _run_analysis_background(analysis_id: int, snapshots: list[dict], analysis_request: str):
+    """后台执行AI分析：更新状态并调用AI"""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE analyses SET status='running', started_at=datetime('now','localtime') WHERE id=?",
+            (analysis_id,),
+        )
+
+    result = await call_ai(snapshots, analysis_request)
 
     with get_db() as conn:
-        if result["error"]:
+        if result.get("error"):
             conn.execute(
                 "UPDATE analyses SET status='failed', error_message=?, "
                 "raw_result=?, completed_at=datetime('now','localtime') WHERE id=?",
-                (result["error"], result["raw_result"], analysis_id),
+                (result["error"], result.get("raw_result"), analysis_id),
+            )
+        elif result.get("warning"):
+            # AI返回结果JSON解析失败，保留原文
+            conn.execute(
+                "UPDATE analyses SET status='completed_with_warning', result_json=NULL, "
+                "raw_result=?, completed_at=datetime('now','localtime') WHERE id=?",
+                (result["raw_result"], analysis_id),
             )
         else:
             conn.execute(
@@ -96,8 +112,6 @@ async def create_analysis(body: AnalysisCreate):
                 "raw_result=?, completed_at=datetime('now','localtime') WHERE id=?",
                 (result["result_json"], result["raw_result"], analysis_id),
             )
-
-    return get_analysis_by_id_impl(analysis_id)
 
 
 def get_analysis_by_id_impl(analysis_id: int) -> AnalysisOut:

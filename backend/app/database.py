@@ -50,7 +50,8 @@ CREATE TABLE IF NOT EXISTS draft_assets (
     order_index INTEGER NOT NULL DEFAULT 0,
     caption     TEXT DEFAULT '',
     FOREIGN KEY (module_id) REFERENCES module_drafts(module_id),
-    FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE
+    FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE,
+    UNIQUE(module_id, asset_id)
 );
 
 -- 版本图片关联表
@@ -108,6 +109,7 @@ CREATE TABLE IF NOT EXISTS analysis_assets (
     analysis_id INTEGER NOT NULL,
     module_id   INTEGER NOT NULL,
     order_index INTEGER NOT NULL,
+    image_order_index INTEGER NOT NULL DEFAULT 0,
     asset_id    INTEGER,
     relative_path TEXT NOT NULL,
     thumbnail_path TEXT,
@@ -191,6 +193,15 @@ def init_database():
             conn.execute("ALTER TABLE analyses ADD COLUMN saved_to_advice INTEGER NOT NULL DEFAULT 0")
         if "review_content" not in columns:
             conn.execute("ALTER TABLE analyses ADD COLUMN review_content TEXT DEFAULT ''")
+        # 迁移：analysis_assets 添加 image_order_index 列
+        aa_columns = {r[1] for r in conn.execute("PRAGMA table_info(analysis_assets)").fetchall()}
+        if "image_order_index" not in aa_columns:
+            conn.execute("ALTER TABLE analysis_assets ADD COLUMN image_order_index INTEGER NOT NULL DEFAULT 0")
+        # 迁移：为 draft_assets 创建唯一索引（防止重复添加同一图片到同一模块）
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_draft_assets_unique "
+            "ON draft_assets(module_id, asset_id)"
+        )
         # 初始化12个模块草稿行
         for m in MODULES:
             conn.execute(
