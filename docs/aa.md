@@ -1,420 +1,421 @@
-我重新检查了最新提交 **`4bd310dc`——“完成审查报告全部Windows端可完成项”**。这次修改是实质性的，进步很明显。
+我重新检查了最新提交 **`34b0d749`——“完成审查报告第三轮全部修复”**。这次确实又修掉了不少问题，但提交说明里“全部修复”仍然说得过满。
 
-## 现在的总体判断
+# 现在的总体判断
 
-**Windows阶段大约完成了80%—85%，已经可以开始准备第一次 macOS arm64 构建。**
+目前可以评价为：
 
-但还不能说“Windows上所有工作都做到位了”。目前仍有 **3个P0级问题**，不修的话，GitHub Actions即使生成 `.app`，也可能出现：
+| 部分                 | 完成度 |
+| -------------------- | -----: |
+| 12格业务功能         |    90% |
+| Windows端开发与调试  |    90% |
+| 数据安全、备份、迁移 |    80% |
+| macOS打包基础        |    60% |
+| macOS真实应用启动器  |    20% |
+| Sparkle自动更新      |    10% |
+| 签名、公证、正式交付 | 0%—10% |
 
-- 应用打不开；
-- 打开后只有后端、没有页面；
-- AI密钥仍然落在SQLite；
-- 自动更新完全不能用。
+**Windows上能够完成的核心业务代码，基本已经做到位了。**
+
+现在可以正式进入：
+
+```text
+GitHub Actions构建第一个macOS arm64测试包
+→ 修正构建问题
+→ M芯片Mac真机测试
+```
+
+但还不能直接告诉李叔“程序已经可以自动更新并长期使用”。
 
 ---
 
-# 这次真正修好的部分
+# 这轮已经真正修好的内容
 
-### 1. 跨平台数据目录已经基本正确
+## 1. Keyring正式加入依赖
 
-现在会根据系统自动选择：
-
-```text
-Windows：
-%LOCALAPPDATA%\Stock Helper\
-
-macOS：
-~/Library/Application Support/Stock Helper/
-```
-
-并且覆盖 `data_dir` 后，数据库、图片、临时文件和备份目录会重新派生，不再继续写到源码目录。
-
-这项可以认定为 **基本完成**。
-
-### 2. 本地接口安全明显加强
-
-目前已经加入：
-
-- 随机会话令牌；
-
-- `Host`白名单；
-
-- 防DNS Rebinding；
-
-- 非开发环境API请求必须带令牌；
-
-- 前端首次启动自动获取令牌；
-
-- 令牌只放在内存，不写入 `localStorage`。
-
-这套安全逻辑对于本地单机系统已经比较合适。
-
-### 3. AI图片限制逻辑修正
-
-现在即使图片达到16张上限，后续模块的文字仍然会继续加入AI请求，不会再把后续模块整体跳过。
-
-### 4. 历史图片顺序修正
-
-历史详情现在按照 `image_order_index` 读取图片，之前“同一模块内图片顺序不稳定”的问题已经修复。
-
-### 5. 备份恢复增加完整回滚
-
-当前恢复流程已经包括：
-
-- 解压前统计总大小；
-
-- 文件数量和单文件大小限制；
-
-- 路径安全检查；
-
-- SQLite完整性检查；
-
-- 恢复前自动备份；
-
-- 数据库和图片回滚副本；
-
-- 恢复失败后自动还原。
-
-比上一版可靠很多。
-
----
-
-# 仍然必须修复的P0问题
-
-## P0-1：Keychain实际上还没有启用
-
-代码虽然写了：
+现在生产依赖中已经加入：
 
 ```text
-MacKeychainStore
-WindowsCredentialStore
+keyring==25.5.0
 ```
 
-但它依赖Python的 `keyring` 包；如果没有安装，就会自动退回 `DevelopmentSecretStore`，继续把密钥写入SQLite数据库。
+正式打包环境如果完全没有Keyring，也不再静默退回SQLite，而是直接报错，避免把密钥偷偷写进普通数据库。
 
-而正式依赖文件中目前没有：
+这个方向正确。
 
-```text
-keyring
-```
+## 2. PyInstaller动态导入和前端路径已修正
 
-只有FastAPI、Pillow、httpx等依赖。
-
-所以现状是：
-
-```text
-代码结构上支持Keychain
-≠
-打包后的Mac程序真的使用Keychain
-```
-
-### 必须修改
-
-在生产依赖中加入锁定版本的 `keyring`，并在PyInstaller中确认打包对应后端：
-
-- macOS Keychain backend；
-- Windows Credential Locker backend；
-- 打包启动时执行一次密钥读写自检；
-- 如果Keychain不可用，正式版本不能静默退回SQLite，应明确报错。
-
-否则李叔输入的AI密钥仍可能明文保存在数据库里。
-
----
-
-## P0-2：当前macOS打包产物很可能启动失败或没有前端页面
-
-这里有两个风险。
-
-### 风险一：PyInstaller可能漏掉 `app.main`
-
-启动代码使用的是动态字符串：
-
-```python
-uvicorn.run("app.main:app")
-```
-
-但PyInstaller配置中的 `hiddenimports` 没有：
-
-```text
-app.main
-app.routers.modules
-app.routers.analysis
-……
-```
-
-PyInstaller无法保证识别字符串形式的动态导入。构建出的程序可能报：
-
-```text
-Could not import module "app.main"
-```
-
-最稳妥的改法是直接导入：
+`run.py`已经改成直接导入FastAPI应用，而不是通过字符串动态导入：
 
 ```python
 from app.main import app
-
-uvicorn.run(
-    app,
-    host=settings.host,
-    port=settings.port,
-)
+uvicorn.run(app, ...)
 ```
 
-### 风险二：前端资源路径可能错一层
+前端资源也开始使用PyInstaller的 `_MEIPASS` 路径查找。
 
-PyInstaller把前端文件打包到：
+Spec中也补充了主要后端模块的隐藏导入。
 
-```text
-frontend/dist
+所以之前“后端启动失败”或者“浏览器里找不到前端”的风险，已经大幅下降。
+
+## 3. 测试环境隔离已经修正
+
+现在会在导入应用模块之前设置测试数据目录，并且每个测试重新初始化干净数据库，解决了测试污染正式数据目录的问题。
+
+## 4. CI已经支持Tag触发
+
+CI现在同时监听：
+
+```yaml
+branches: [main]
+tags:
+  - "v*"
 ```
 
-但是主程序查找前端时使用：
+原来macOS构建任务永远不会触发的问题，已经修复。
 
-```python
-FRONTEND_DIST = settings.base_dir.parent / "frontend" / "dist"
-```
+## 5. 备份恢复继续加强
 
-在源码环境能正常工作，但打包后资源通常应从PyInstaller运行目录读取。当前没有显式使用：
+已经增加：
 
-```python
-sys._MEIPASS
-```
+- 恢复操作锁；
+- 解压前文件数量和体积检查；
+- 数据库及图片完整回滚；
+- 从数据库读取真实 `schema_version`；
+- 原子覆盖备份文件。
 
-因此很可能出现：
-
-```text
-后端启动成功
-但浏览器打开后显示“前端文件未找到”
-```
-
-需要增加统一的资源路径函数：
-
-```python
-def resource_path(relative: str) -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys._MEIPASS) / relative
-    return PROJECT_ROOT / relative
-```
-
-这两项仍然可以在Windows写完，再交给GitHub Actions的Mac环境验证。
+这部分已经达到可继续真机测试的水平。
 
 ---
 
-## P0-3：Sparkle自动更新目前只是“占位代码”，还不能真正工作
+# 现在最严重的问题：Swift启动器根本没有被用上
 
-现在的 `.app` 创建了一个空的：
-
-```text
-Contents/Frameworks/
-```
-
-但构建脚本没有复制Sparkle Framework，也没有Swift/AppKit启动器或 `SPUStandardUpdaterController`。
-
-也就是说，目前客户端根本没有：
-
-- 检查更新；
-- 显示新版本；
-- 下载更新；
-- 替换旧应用；
-- 重启；
-- 失败回退。
-
-### 当前appcast也有明确错误
-
-Release工作流把版本参数传成：
+仓库里确实新增了：
 
 ```text
-github.ref_name
+packaging/macos/launcher/main.swift
+packaging/macos/launcher/Updater.swift
 ```
 
-例如：
+`main.swift`里也写了：
+
+- 启动后端；
+
+- 等待服务；
+
+- 打开浏览器；
+
+- 创建菜单栏图标；
+
+- 点击退出时停止后端。
+
+但是，**构建脚本完全没有编译这个Swift文件。**
+
+构建脚本最终仍然把下面这个Shell脚本写入应用：
+
+```bash
+#!/bin/bash
+DIR=".../Resources/backend"
+exec "./stock-helper-server"
+```
+
+因此，当前生成出来的 `.app` 实际运行的是：
+
+> Shell脚本启动器，而不是刚写的Swift启动器。
+
+这意味着现在实际交付的应用没有：
+
+- 菜单栏图标；
+- “打开股票分析助手”菜单；
+- “退出”菜单；
+- 可靠的后端进程管理；
+- 防止重复启动；
+- Swift层面的Sparkle更新控制器。
+
+换句话说：
+
+> `main.swift`目前属于仓库里“写好了但没有参加构建”的死代码。
+
+## 正确做法
+
+构建脚本需要真正执行类似：
+
+```bash
+swiftc \
+  packaging/macos/launcher/main.swift \
+  packaging/macos/launcher/Updater.swift \
+  -framework Cocoa \
+  -F "$SPARKLE_FRAMEWORK_PATH" \
+  -framework Sparkle \
+  -Xlinker -rpath \
+  -Xlinker "@executable_path/../Frameworks" \
+  -o "$APP_DIR/Contents/MacOS/StockHelperLauncher"
+```
+
+然后删除当前生成Shell启动器的代码。
+
+---
+
+# 第二个严重问题：Sparkle仍然没有真正接入
+
+`Updater.swift`目前全部是说明性注释：
+
+```swift
+// import Sparkle
+// 取消注释当 Sparkle.framework 集成后
+```
+
+而且没有实际创建：
+
+```swift
+SPUStandardUpdaterController
+```
+
+构建脚本虽然会下载并复制 `Sparkle.framework`，但：
+
+- Swift启动器没有链接Sparkle；
+- `import Sparkle`没有启用；
+- 没有“检查更新”菜单；
+- 没有启动自动检查；
+- 没有处理更新完成后的重启；
+- 没有实际验证更新包签名。
+
+所以目前的情况是：
 
 ```text
-v1.0.1
+Sparkle.framework被放进.app
+≠
+应用已经有自动更新功能
 ```
 
-生成器又在下载地址前增加一个 `v`：
+**目前自动更新仍然不可用。**
 
-```python
-releases/download/v{version}/
-```
+---
 
-最终地址会变成：
+# 第三个严重问题：更新包文件名仍然对不上
+
+构建脚本会生成：
 
 ```text
-releases/download/vv1.0.1/
+StockHelper-1.0.1.zip
 ```
 
-下载地址是错的。
+因为它会去掉Tag中的 `v`。
 
-另外，当前代码把SHA-256哈希直接写进：
+但Release工作流又重新生成：
+
+```text
+StockHelper-v1.0.1.zip
+```
+
+并且最终只上传这个带 `v` 的文件。
+
+与此同时，appcast中的下载地址是：
+
+```text
+StockHelper-1.0.1.zip
+```
+
+不带 `v`。
+
+最终结果：
+
+```text
+GitHub Release实际文件：
+StockHelper-v1.0.1.zip
+
+appcast要求下载：
+StockHelper-1.0.1.zip
+```
+
+客户端会得到404。
+
+## 应该统一为一种格式
+
+建议统一为：
+
+```text
+Tag：v1.0.1
+内部版本号：1.0.1
+更新包：StockHelper-1.0.1.zip
+```
+
+Release工作流不要重新压缩，直接上传 `build_app.sh` 已经通过 `ditto` 生成的包。
+
+---
+
+# 第四个严重问题：Sparkle签名仍然为空
+
+当前生成的appcast里：
 
 ```xml
-sparkle:edSignature
+sparkle:edSignature=""
 ```
 
-但Sparkle要求这里是真正使用EdDSA私钥生成的签名，不是普通SHA-256值。官方推荐使用Sparkle自带的 `generate_appcast` 或 `sign_update` 生成签名。([sparkle-project.org][1])
+同时应用内的公钥还是：
 
-### 应用版本也被写死
+```xml
+<SUPublicEDKey>待生成</SUPublicEDKey>
+```
 
-无论发布标签是多少，`Info.plist`始终写：
+这意味着即使客户端真正接入Sparkle，也无法验证和安装更新包。
+
+正确流程必须是：
 
 ```text
-CFBundleVersion = 1.0.0
-CFBundleShortVersionString = 1.0.0
+生成Sparkle EdDSA密钥对
+→ 公钥写进Info.plist
+→ 私钥保存在GitHub Actions Secrets
+→ sign_update对ZIP签名
+→ 签名值写进appcast.xml
+→ 上传ZIP和appcast
 ```
 
-Sparkle依赖递增的应用版本判断是否存在新版，因此这里必须由Git标签动态生成。([sparkle-project.org][2])
+不能发布一个空签名的appcast。
 
 ---
 
-# 仍需补齐的P1问题
+# 第五个问题：Swift健康检查和后端令牌发生冲突
 
-## 1. CI中的macOS构建任务实际上不会触发
-
-`ci.yml`只在以下情况触发：
-
-```yaml
-push:
-  branches: [main]
-```
-
-但 `macos-build` 又要求：
-
-```yaml
-if: startsWith(github.ref, 'refs/tags/v')
-```
-
-主分支提交不是Tag，Tag推送又不会触发这个CI工作流，因此这个任务实际上是“死任务”。
-
-应改成以下任意一种：
-
-```yaml
-push:
-  branches: [main]
-  tags:
-    - "v*"
-```
-
-或者让主分支每次都构建一个未签名的Mac测试产物。
-
-## 2. Release没有先运行测试
-
-`release.yml`接到标签后直接构建和发布，没有先执行：
-
-- 后端测试；
-- Ruff；
-- 前端构建校验之外的检查；
-- 打包后启动测试。
-
-正式流程应为：
+Swift启动器会调用：
 
 ```text
-测试通过
-→ 打包
-→ 启动健康检查
-→ 签名
-→ 公证
-→ 生成Sparkle签名
-→ 创建Release
+http://127.0.0.1:8765/api/health
 ```
 
-并增加：
+并要求返回200。
 
-```yaml
-permissions:
-  contents: write
+但是后端安全中间件规定：
+
+- 除了 `/api/session`；
+- 其他所有 `/api/` 请求都必须带会话令牌。
+
+Swift启动器没有带令牌，因此：
+
+```text
+GET /api/health
+→ 401
 ```
 
-## 3. “ESLint已配置”目前名不副实
+启动器会一直等待30次，每次1秒，然后才打开浏览器。
 
-虽然新增了 `.eslintrc.cjs`，但 `package.json`：
+也就是说，Swift启动器真正启用后，每次打开应用可能白等约30秒。
 
-- 没有安装 `eslint`；
+## 修复方案
 
-- 没有Vue解析插件；
-
-- 没有 `lint` 脚本；
-
-- CI也没有执行前端lint。
-
-所以目前只是放了一个配置文件，实际不能完成Vue代码检查。
-
-## 4. 测试环境隔离顺序有错误
-
-测试代码先导入：
+最简单的是把健康检查设为免令牌：
 
 ```python
-from app.main import app
+if path in {"/api/session", "/api/health"}:
+    return await call_next(request)
 ```
 
-之后才设置：
+健康接口只返回：
 
-```python
-STOCK_DATA_DIR
+```json
+{ "status": "ok" }
 ```
 
-但 `app.main` 导入时已经初始化了全局 `settings`，因此后面设置环境变量已经太晚。测试很可能仍然使用默认数据目录，而不是 `tests/test_data`。
-
-应在任何 `app` 模块导入前设置环境变量，或者使用 `monkeypatch` 后重新加载配置模块。
-
-现有11个测试也主要是基础CRUD，只覆盖：
-
-- 模块查询和保存；
-
-- 常用组合；
-
-- 创建备份；
-
-- 无效备份拒绝。
-
-还没有覆盖：
-
-- AI异步任务；
-- 图片压缩和16张限制；
-- 会话令牌；
-- Host校验；
-- 数据库迁移；
-- 成功备份后完整恢复；
-- 恢复失败数据库回滚；
-- PyInstaller程序启动；
-- 前端页面流程；
-- 自动更新。
+不包含客户数据，允许本机免令牌访问是合理的。
 
 ---
 
-# 备份还剩两个完善点
+# ESLint仍然没有真正配置完整
 
-现在备份比以前可靠很多，但还应修：
+现在已经增加：
 
-1. 上传备份时使用 `await file.read()` 一次把整个文件读入内存，尚未限制压缩包本身大小。
-2. 临时文件固定使用 `restore.zip`、`restore_extract`、`db_rollback.db`，没有恢复锁；连续点击或并发请求可能互相覆盖。
-3. `manifest.json` 中 `schema_version` 仍固定写成 `1`，而数据库迁移当前已经到版本4。
+```json
+"lint": "eslint src --ext .vue,.js",
+"eslint": "^8.57.0"
+```
 
-应从数据库读取真实版本写入manifest，并检查备份版本是否高于当前程序支持版本。
-
----
-
-# 最终结论
-
-这次可以改口为：
-
-> **Windows端的核心业务和大部分工程底座已经完成，可以进入macOS构建准备阶段；但Keychain依赖、PyInstaller资源/导入、CI触发和Sparkle更新链路仍未达到可用状态。**
-
-现在不是推倒重写，而是再完成最后一轮工程修正：
+但还缺少：
 
 ```text
-修复Keyring依赖
-→ 修复PyInstaller动态导入和资源路径
-→ 修复测试隔离
-→ 修复CI触发
-→ 用真实Sparkle工具生成签名
-→ 让版本号随Tag变化
-→ GitHub Actions生成第一个arm64 .app
-→ 在你的M芯片Mac上安装测试
+eslint-plugin-vue
+vue-eslint-parser
 ```
 
-完成前三项后，就可以合理地说：**Windows上能做的主体工作基本做到位了。**
+普通ESLint无法正确解析 `.vue` 单文件组件。
 
-[1]: https://sparkle-project.org/documentation/publishing/?utm_source=chatgpt.com "Publishing an update - Sparkle: open source software update framework for macOS"
-[2]: https://sparkle-project.org/documentation/?utm_source=chatgpt.com "Documentation - Sparkle: open source software update framework for macOS"
+而CI目前也只执行：
+
+```text
+npm run build
+```
+
+没有执行：
+
+```text
+npm run lint
+```
+
+所以“ESLint完成”仍然只是部分完成。
+
+---
+
+# Keychain还有一个迁移问题
+
+新代码会从Keychain读取AI密钥，但早期版本可能已经把密钥存进SQLite的：
+
+```text
+settings.ai_api_key
+```
+
+当前没有看到“一次性迁移”逻辑：
+
+```text
+发现数据库有旧密钥
+→ 写入Keychain
+→ 验证读取成功
+→ 删除数据库旧密钥
+```
+
+虽然李叔还没有正式投入使用，影响暂时不大，但在首次正式发布前最好清理掉，避免开发测试期间的旧密钥继续留在数据库和备份文件中。
+
+---
+
+# 测试比以前多，但不能证明Mac版本可交付
+
+现在新增了模块、组合、备份、安全和分析相关测试，这比之前明显好。
+
+但所谓“16个测试全部通过”，主要还是API基础测试，还没有覆盖：
+
+- PyInstaller产物真实启动；
+- `.app`双击启动；
+- Swift启动器编译；
+- Sparkle检查更新；
+- Keychain真实读写；
+- 自动更新后数据是否保留；
+- 恢复成功后的完整数据比对；
+- 恢复中途失败自动回滚；
+- Mac重启和重复启动；
+- Gatekeeper；
+- 签名和公证。
+
+另外，我目前没有看到该提交对应的已通过状态检查记录，因此“测试全部通过”现在主要还是提交说明里的声明，尚不能当作GitHub CI成功证据。
+
+---
+
+# 最终判断
+
+这次修改后，可以确认：
+
+> **Windows上的核心业务开发、跨平台数据目录、基础安全、备份恢复、数据库迁移和测试框架已经基本做到位。**
+
+现在真正剩下的核心工作已经集中到macOS交付链路：
+
+```text
+真正编译Swift启动器
+→ 正式链接Sparkle
+→ 修复health令牌冲突
+→ 统一更新包文件名
+→ 生成真实EdDSA签名
+→ 动态写入SUPublicEDKey
+→ GitHub Actions生成arm64应用
+→ 应用启动冒烟测试
+→ M芯片Mac真机安装
+→ 签名和公证
+→ 1.0.0升级1.0.1完整测试
+```
+
+所以现在可以进入Mac构建阶段，但**不要发布Tag给李叔更新**。应先把Swift启动器和Sparkle链路真正接通，否则当前所谓的“自动更新”只是目录、框架和说明文件已经存在，功能本身还没有运行起来。

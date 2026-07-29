@@ -11,6 +11,9 @@ permissions:
 jobs:
   release:
     runs-on: macos-14
+    env:
+      # 提到 job 级，使签名步骤的 if 条件能正确判断 secret 是否存在
+      SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -48,22 +51,48 @@ jobs:
         run: |
           chmod +x packaging/macos/build_app.sh
           VERSION=$APP_VERSION bash packaging/macos/build_app.sh
+          # 暴露不带 v 前缀的版本号供后续步骤使用（build_app.sh 内部已去 v 前缀）
+          echo "APP_VERSION_CLEAN=${APP_VERSION#v}" >> $GITHUB_ENV
+
+      - name: Sparkle 签名
+        if: env.SPARKLE_PRIVATE_KEY != ''
+        run: |
+          # 定位 sign_update 工具（build_app.sh 已将 Sparkle 解压到 /tmp/sparkle_extract）
+          SIGN_TOOL="/tmp/sparkle_extract/Sparkle.framework/Resources/bin/sign_update"
+          if [ ! -x "$SIGN_TOOL" ]; then
+            SIGN_TOOL=$(find /tmp/sparkle_extract -name sign_update -type f 2>/dev/null | head -1)
+          fi
+          if [ -z "$SIGN_TOOL" ] || [ ! -x "$SIGN_TOOL" ]; then
+            echo "警告: 未找到 sign_update 工具，跳过 EdDSA 签名"
+            exit 0
+          fi
+          # 使用 Sparkle 的 sign_update 工具签名
+          SIGNATURE=$("$SIGN_TOOL" "dist/StockHelper-${APP_VERSION_CLEAN}.zip" -p "$SPARKLE_PRIVATE_KEY" 2>&1 | head -1)
+          echo "SIGNATURE=$SIGNATURE" >> $GITHUB_ENV
+          echo "签名结果: $SIGNATURE"
 
       - name: 生成 appcast
         run: |
-          cd dist
-          zip -r StockHelper-${{ github.ref_name }}.zip 股票分析助手.app
-          cd ..
-          python packaging/macos/generate_appcast.py "dist/StockHelper-${{ github.ref_name }}.zip" "${{ github.ref_name }}" "dist/appcast.xml"
+          # 直接使用 build_app.sh 产物（已通过 ditto 生成 zip），不再重新压缩
+          python packaging/macos/generate_appcast.py "dist/StockHelper-${APP_VERSION_CLEAN}.zip" "${APP_VERSION_CLEAN}" "dist/appcast.xml"
+          # 若存在有效的 Sparkle 签名，替换 appcast 中的空 edSignature
+          if [ -n "$SIGNATURE" ] && echo "$SIGNATURE" | grep -q "^edSignature:"; then
+            # sign_update 输出格式: edSignature:xxx length=yyy，取首个 token 作为签名值
+            SIG_VALUE=$(echo "$SIGNATURE" | awk '{print $1}')
+            sed -i '' "s|sparkle:edSignature=\"\"|sparkle:edSignature=\"${SIG_VALUE}\"|" dist/appcast.xml
+            echo "已注入 EdDSA 签名: $SIG_VALUE"
+          else
+            echo "未提供有效签名 ($SIGNATURE)，appcast 中 edSignature 留空"
+          fi
 
       - name: 创建 Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/StockHelper-${{ github.ref_name }}.zip
+            dist/StockHelper-${{ env.APP_VERSION_CLEAN }}.zip
             dist/appcast.xml
           body: |
-            ## 股票助手 ${{ github.ref_name }}
+            ## 股票助手 v${{ env.APP_VERSION_CLEAN }}
 
             ### 更新内容
             - 请在此处填写更新说明

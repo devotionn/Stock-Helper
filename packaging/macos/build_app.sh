@@ -81,25 +81,48 @@ cat > "$APP_DIR/Contents/Info.plist" << PLIST
 </plist>
 PLIST
 
-# 创建启动脚本
-cat > "$APP_DIR/Contents/MacOS/StockHelperLauncher" << LAUNCHER
-#!/bin/bash
-# 股票分析助手启动器
-DIR="\$(dirname "\$(dirname "\$0")")/Resources/backend"
-cd "\$DIR"
-export PYTHONPATH="\$DIR"
-exec "./stock-helper-server"
-LAUNCHER
-chmod +x "$APP_DIR/Contents/MacOS/StockHelperLauncher"
-
-# 5. 下载 Sparkle Framework
-echo "[5/7] 下载 Sparkle Framework..."
+# 下载 Sparkle Framework（编译启动器前需要，canImport(Sparkle) 在编译期检查）
+echo "下载 Sparkle Framework..."
 SPARKLE_VERSION="2.6.4"
 SPARKLE_URL="https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VERSION}/Sparkle-${SPARKLE_VERSION}.tar.xz"
 curl -L "$SPARKLE_URL" -o /tmp/sparkle.tar.xz
 mkdir -p /tmp/sparkle_extract
 tar -xf /tmp/sparkle.tar.xz -C /tmp/sparkle_extract
 cp -R /tmp/sparkle_extract/Sparkle.framework "$APP_DIR/Contents/Frameworks/"
+
+# 5. 编译 Swift 启动器
+echo "[5/7] 编译 Swift 启动器..."
+LAUNCHER_DIR="$PROJECT_ROOT/packaging/macos/launcher"
+
+# 先尝试带 Sparkle 编译，失败则不带 Sparkle 编译
+if [ -d "$APP_DIR/Contents/Frameworks/Sparkle.framework" ]; then
+    swiftc \
+        "$LAUNCHER_DIR/main.swift" \
+        "$LAUNCHER_DIR/Updater.swift" \
+        -framework Cocoa \
+        -F "$APP_DIR/Contents/Frameworks" \
+        -framework Sparkle \
+        -Xlinker -rpath \
+        -Xlinker "@executable_path/../Frameworks" \
+        -o "$APP_DIR/Contents/MacOS/StockHelperLauncher" 2>/dev/null || {
+        echo "Sparkle 编译失败，回退到不带 Sparkle 编译..."
+        swiftc \
+            "$LAUNCHER_DIR/main.swift" \
+            -framework Cocoa \
+            -o "$APP_DIR/Contents/MacOS/StockHelperLauncher"
+    }
+else
+    swiftc \
+        "$LAUNCHER_DIR/main.swift" \
+        -framework Cocoa \
+        -o "$APP_DIR/Contents/MacOS/StockHelperLauncher"
+fi
+
+if [ ! -f "$APP_DIR/Contents/MacOS/StockHelperLauncher" ]; then
+    echo "错误: Swift 启动器编译失败"
+    exit 1
+fi
+echo "Swift 启动器编译成功"
 
 # 6. 创建分发包 zip
 echo "[6/7] 创建分发包..."

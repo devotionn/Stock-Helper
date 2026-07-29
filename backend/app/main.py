@@ -77,7 +77,7 @@ async def security_check(request: Request, call_next):
         if host not in ALLOWED_HOSTS:
             return JSONResponse(status_code=403, content={"detail": "Forbidden host"})
         # /api/session 是获取令牌的入口，无需校验令牌
-        if path == "/api/session":
+        if path in ("/api/session", "/api/health"):
             return await call_next(request)
         # 开发环境（来自 dev server 的请求）不强制令牌，方便调试
         origin = request.headers.get("origin", "")

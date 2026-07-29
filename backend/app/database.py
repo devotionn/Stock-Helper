@@ -242,3 +242,19 @@ def init_database():
                 "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
                 (k, v),
             )
+        # 密钥迁移：如果数据库 settings 表中有旧的 ai_api_key，迁移到 SecretStore
+        try:
+            row = conn.execute(
+                "SELECT value FROM settings WHERE key='ai_api_key'"
+            ).fetchone()
+            if row and row["value"]:
+                from .services.secret_store import get_secret_store
+                store = get_secret_store()
+                if not store.has_secret("ai_api_key"):
+                    store.set_secret("ai_api_key", row["value"])
+                    # 验证迁移成功
+                    if store.get_secret("ai_api_key"):
+                        conn.execute("DELETE FROM settings WHERE key='ai_api_key'")
+                        print("[迁移] AI密钥已从数据库迁移到安全存储")
+        except Exception as e:
+            print(f"[迁移] 密钥迁移跳过: {e}")

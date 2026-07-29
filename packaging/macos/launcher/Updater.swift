@@ -1,29 +1,23 @@
-// Sparkle 自动更新集成
-// 需要在 Xcode 项目中链接 Sparkle.framework
-
-import Cocoa
-// import Sparkle  // 取消注释当 Sparkle.framework 集成后
-
-class UpdaterController: NSObject {
-    // SPUStandardUpdaterController 需要在 Xcode 中配置
-    // 这里提供集成说明:
-    //
-    // 1. 在 Info.plist 中添加:
-    //    SUFeedURL = https://github.com/devotionn/Stock-Helper/releases/latest/download/appcast.xml
-    //    SUEnableAutomaticChecks = true
-    //    SUScheduledCheckInterval = 86400 (每天检查一次)
-    //
-    // 2. 在 AppDelegate 中:
-    //    let updaterController = SPUStandardUpdaterController(
-    //        startingUpdater: true,
-    //        updaterDelegate: nil,
-    //        userDriverDelegate: nil
-    //    )
-    //
-    // 3. 添加菜单项 "检查更新" -> updaterController.checkForUpdates(nil)
-    //
-    // 4. 生成 EdDSA 密钥对:
-    //    ./bin/generate_keys -p
-    //    将公钥写入 Info.plist 的 SUPublicEDKey
-    //    私钥用于 sign_update 工具签名更新包
-}
+// Updater.swift - Sparkle 自动更新配置说明
+//
+// 此文件提供 Sparkle 集成的关键配置信息。
+// 实际的 SPUStandardUpdaterController 初始化在 main.swift 中完成。
+//
+// Info.plist 中的 Sparkle 配置（由 build_app.sh 注入）:
+//   SUFeedURL        - appcast.xml 的 URL
+//   SUPublicEDKey    - EdDSA 公钥（验证更新包签名）
+//   SUEnableAutomaticChecks - 自动检查开关
+//   SUScheduledCheckInterval - 检查间隔（秒）
+//
+// EdDSA 密钥对生成:
+//   1. 下载 Sparkle.framework
+//   2. 运行 ./bin/generate_keys -p 生成密钥对
+//   3. 公钥写入 Info.plist 的 SUPublicEDKey
+//   4. 私钥保存到 GitHub Actions Secrets: SPARKLE_PRIVATE_KEY
+//   5. 发布时用 sign_update 对 ZIP 签名:
+//      ./bin/sign_update StockHelper-1.0.1.zip -p <private_key>
+//   6. 输出格式: "edSignature:..." 长度:..."
+//   7. 将签名值写入 appcast.xml 的 sparkle:edSignature
+//
+// 本文件目前不需要包含可执行代码。
+// Sparkle 的更新流程由 main.swift 中的 SPUStandardUpdaterController 管理。
