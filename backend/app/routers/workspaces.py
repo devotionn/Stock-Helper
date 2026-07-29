@@ -1,7 +1,7 @@
 """按投研日期管理 12 个模块、图片与日历状态。"""
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import Any
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
@@ -15,6 +15,7 @@ from ..services.image import save_uploaded_image
 router = APIRouter()
 MODULE_MAP = {module["id"]: module for module in MODULES}
 DEFAULT_COPY_MODULE_IDS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 10]
+COMPLETED_ANALYSIS_STATUSES = ("completed", "completed_with_warning")
 
 
 class CopyWorkspaceRequest(BaseModel):
@@ -63,6 +64,15 @@ def _entry_row(conn, record_date: str, module_id: int):
     ).fetchone()
 
 
+def _entry_image_count(conn, entry_id: int) -> int:
+    return int(
+        conn.execute(
+            "SELECT COUNT(*) FROM entry_assets WHERE module_entry_id=?",
+            (entry_id,),
+        ).fetchone()[0]
+    )
+
+
 def _entry_has_content(row, image_count: int) -> bool:
     return bool(
         (row["text_content"] or "").strip()
@@ -72,12 +82,8 @@ def _entry_has_content(row, image_count: int) -> bool:
 
 
 def _module_payload(conn, row) -> dict[str, Any]:
-    image_count = conn.execute(
-        "SELECT COUNT(*) FROM entry_assets WHERE module_entry_id=?",
-        (row["id"],),
-    ).fetchone()[0]
+    image_count = _entry_image_count(conn, row["id"])
     module = MODULE_MAP[row["module_id"]]
-    has_content = _entry_has_content(row, image_count)
     return {
         "entry_id": row["id"],
         "record_date": row["record_date"],
@@ -92,14 +98,25 @@ def _module_payload(conn, row) -> dict[str, Any]:
         "period_end": row["period_end"],
         "updated_at": row["updated_at"],
         "image_count": image_count,
-        "has_content": has_content,
+        "has_content": _entry_has_content(row, image_count),
         "text_summary": _text_summary(row["text_content"]),
     }
 
 
+def _completed_analysis_count(conn, record_date: str) -> int:
+    placeholders = ",".join("?" for _ in COMPLETED_ANALYSIS_STATUSES)
+    return int(
+        conn.execute(
+            f"SELECT COUNT(*) FROM analyses WHERE record_date=? "
+            f"AND status IN ({placeholders})",
+            (record_date, *COMPLETED_ANALYSIS_STATUSES),
+        ).fetchone()[0]
+    )
+
+
 @router.get("/calendar")
 def get_calendar(month: str = Query(..., description="YYYY-MM")):
-    """一次返回整月的录入完成度和 AI 分析状态。"""
+    """一次返回整月录入完成度和已完成的 AI 分析次数。"""
     month = _parse_month(month)
     with get_db() as conn:
         rows = conn.execute(
@@ -111,10 +128,12 @@ def get_calendar(month: str = Query(..., description="YYYY-MM")):
             "GROUP BY e.id ORDER BY e.record_date, e.module_id",
             (month + "-%",),
         ).fetchall()
+        placeholders = ",".join("?" for _ in COMPLETED_ANALYSIS_STATUSES)
         analyses = conn.execute(
-            "SELECT record_date, COUNT(*) AS analysis_count FROM analyses "
-            "WHERE record_date LIKE ? GROUP BY record_date",
-            (month + "-%",),
+            f"SELECT record_date, COUNT(*) AS analysis_count FROM analyses "
+            f"WHERE record_date LIKE ? AND status IN ({placeholders}) "
+            "GROUP BY record_date",
+            (month + "-%", *COMPLETED_ANALYSIS_STATUSES),
         ).fetchall()
 
     days: dict[str, dict[str, Any]] = {}
@@ -157,7 +176,10 @@ def get_calendar(month: str = Query(..., description="YYYY-MM")):
         elif item["completed_count"] > 0:
             item["status"] = "partial"
 
-    return {"month": month, "days": sorted(days.values(), key=lambda item: item["date"])}
+    return {
+        "month": month,
+        "days": sorted(days.values(), key=lambda item: item["date"]),
+    }
 
 
 @router.get("/{record_date}")
@@ -171,10 +193,7 @@ def get_workspace(record_date: str):
             (record_date,),
         ).fetchall()
         cards = [_module_payload(conn, row) for row in rows]
-        analysis_count = conn.execute(
-            "SELECT COUNT(*) FROM analyses WHERE record_date=?",
-            (record_date,),
-        ).fetchone()[0]
+        analysis_count = _completed_analysis_count(conn, record_date)
 
     completed_count = sum(1 for card in cards if card["has_content"])
     status = "empty"
@@ -196,7 +215,7 @@ def get_workspace(record_date: str):
 
 @router.post("/{target_date}/copy")
 def copy_workspace(target_date: str, body: CopyWorkspaceRequest):
-    """复制上一日或任意来源日期的选定模块；默认不覆盖已有内容。"""
+    """复制任意来源日期的选定模块；空模块不复制，默认不覆盖已有内容。"""
     target_date = _parse_date(target_date)
     source_date = _parse_date(body.source_date)
     if target_date == source_date:
@@ -210,31 +229,37 @@ def copy_workspace(target_date: str, body: CopyWorkspaceRequest):
     copied: list[int] = []
     skipped: list[int] = []
     with get_db() as conn:
-        source_count = conn.execute(
-            "SELECT COUNT(*) FROM module_entries WHERE record_date=?",
-            (source_date,),
-        ).fetchone()[0]
-        if source_count == 0:
-            raise HTTPException(status_code=404, detail="来源日期没有可复制的数据")
+        sources = {
+            row["module_id"]: row
+            for row in conn.execute(
+                "SELECT * FROM module_entries WHERE record_date=?",
+                (source_date,),
+            ).fetchall()
+        }
+        meaningful_source_ids = {
+            module_id
+            for module_id in module_ids
+            if module_id in sources
+            and _entry_has_content(
+                sources[module_id],
+                _entry_image_count(conn, sources[module_id]["id"]),
+            )
+        }
+        if not meaningful_source_ids:
+            raise HTTPException(status_code=404, detail="来源日期没有可复制的基础内容")
 
         _ensure_entries(conn, target_date)
         for module_id in module_ids:
-            source = conn.execute(
-                "SELECT * FROM module_entries WHERE record_date=? AND module_id=?",
-                (source_date, module_id),
-            ).fetchone()
+            source = sources.get(module_id)
             target = conn.execute(
                 "SELECT * FROM module_entries WHERE record_date=? AND module_id=?",
                 (target_date, module_id),
             ).fetchone()
-            if not source or not target:
+            if module_id not in meaningful_source_ids or not source or not target:
                 skipped.append(module_id)
                 continue
 
-            target_image_count = conn.execute(
-                "SELECT COUNT(*) FROM entry_assets WHERE module_entry_id=?",
-                (target["id"],),
-            ).fetchone()[0]
+            target_image_count = _entry_image_count(conn, target["id"])
             if _entry_has_content(target, target_image_count) and not body.overwrite:
                 skipped.append(module_id)
                 continue
@@ -283,8 +308,7 @@ def copy_workspace(target_date: str, body: CopyWorkspaceRequest):
 def get_module(record_date: str, module_id: int):
     record_date = _parse_date(record_date)
     with get_db() as conn:
-        row = _entry_row(conn, record_date, module_id)
-        return _module_payload(conn, row)
+        return _module_payload(conn, _entry_row(conn, record_date, module_id))
 
 
 @router.put("/{record_date}/modules/{module_id}")
@@ -351,6 +375,8 @@ async def upload_image(
     file: UploadFile = File(...),
 ):
     record_date = _parse_date(record_date)
+    if module_id not in MODULE_MAP:
+        raise HTTPException(status_code=404, detail="模块不存在")
     info = await save_uploaded_image(file)
     with get_db() as conn:
         entry = _entry_row(conn, record_date, module_id)
@@ -387,20 +413,22 @@ async def upload_image(
             order_index = existing["order_index"]
             caption = existing["caption"]
         else:
-            max_order = conn.execute(
-                "SELECT COALESCE(MAX(order_index), 0) FROM entry_assets WHERE module_entry_id=?",
-                (entry["id"],),
-            ).fetchone()[0]
-            order_index = max_order + 1
+            order_index = int(
+                conn.execute(
+                    "SELECT COALESCE(MAX(order_index), 0) FROM entry_assets "
+                    "WHERE module_entry_id=?",
+                    (entry["id"],),
+                ).fetchone()[0]
+            ) + 1
             caption = ""
             conn.execute(
                 "INSERT INTO entry_assets(module_entry_id, asset_id, order_index, caption) "
                 "VALUES (?, ?, ?, '')",
                 (entry["id"], asset_id, order_index),
             )
+            # 图片是独立关联数据，不改变文字乐观锁 revision，避免随后文字保存误报冲突。
             conn.execute(
-                "UPDATE module_entries SET revision=revision+1, "
-                "updated_at=datetime('now','localtime') WHERE id=?",
+                "UPDATE module_entries SET updated_at=datetime('now','localtime') WHERE id=?",
                 (entry["id"],),
             )
 
@@ -423,13 +451,14 @@ def delete_image(record_date: str, module_id: int, asset_id: int):
     record_date = _parse_date(record_date)
     with get_db() as conn:
         entry = _entry_row(conn, record_date, module_id)
-        conn.execute(
+        deleted = conn.execute(
             "DELETE FROM entry_assets WHERE module_entry_id=? AND asset_id=?",
             (entry["id"], asset_id),
-        )
+        ).rowcount
+        if not deleted:
+            raise HTTPException(status_code=404, detail="图片不存在或已被移除")
         conn.execute(
-            "UPDATE module_entries SET revision=revision+1, "
-            "updated_at=datetime('now','localtime') WHERE id=?",
+            "UPDATE module_entries SET updated_at=datetime('now','localtime') WHERE id=?",
             (entry["id"],),
         )
         refs = conn.execute(
@@ -441,7 +470,8 @@ def delete_image(record_date: str, module_id: int, asset_id: int):
         ).fetchall()
         if sum(row[0] for row in refs) == 0:
             conn.execute(
-                "UPDATE assets SET is_orphan=1, orphan_since=datetime('now','localtime') WHERE id=?",
+                "UPDATE assets SET is_orphan=1, orphan_since=datetime('now','localtime') "
+                "WHERE id=?",
                 (asset_id,),
             )
     return {"message": "已移除"}
@@ -458,22 +488,30 @@ def update_image(
     with get_db() as conn:
         entry = _entry_row(conn, record_date, module_id)
         if body.order_index is None:
-            conn.execute(
+            result = conn.execute(
                 "UPDATE entry_assets SET caption=? WHERE module_entry_id=? AND asset_id=?",
                 (body.caption, entry["id"], asset_id),
             )
         else:
-            conn.execute(
+            result = conn.execute(
                 "UPDATE entry_assets SET caption=?, order_index=? "
                 "WHERE module_entry_id=? AND asset_id=?",
                 (body.caption, body.order_index, entry["id"], asset_id),
             )
+        if not result.rowcount:
+            raise HTTPException(status_code=404, detail="图片不存在或已被移除")
+        conn.execute(
+            "UPDATE module_entries SET updated_at=datetime('now','localtime') WHERE id=?",
+            (entry["id"],),
+        )
     return {"message": "已更新"}
 
 
 @router.put("/{record_date}/modules/{module_id}/images/reorder")
 def reorder_images(record_date: str, module_id: int, asset_ids: list[int]):
     record_date = _parse_date(record_date)
+    if len(asset_ids) != len(set(asset_ids)):
+        raise HTTPException(status_code=422, detail="图片列表包含重复项")
     with get_db() as conn:
         entry = _entry_row(conn, record_date, module_id)
         existing = {
@@ -490,4 +528,8 @@ def reorder_images(record_date: str, module_id: int, asset_ids: list[int]):
                 "UPDATE entry_assets SET order_index=? WHERE module_entry_id=? AND asset_id=?",
                 (index, entry["id"], asset_id),
             )
+        conn.execute(
+            "UPDATE module_entries SET updated_at=datetime('now','localtime') WHERE id=?",
+            (entry["id"],),
+        )
     return {"message": "排序已更新"}
