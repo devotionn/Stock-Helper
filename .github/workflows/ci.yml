@@ -65,7 +65,21 @@ jobs:
           SPARKLE_PUBLIC_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
           GITHUB_API_TOKEN: ${{ github.token }}
           TEST_KEYCHAIN: '1'
+        shell: bash
         run: |
+          set -euo pipefail
+          SMOKE_KEYCHAIN="$RUNNER_TEMP/stock-helper-smoke.keychain-db"
+          SMOKE_KEYCHAIN_PASSWORD="$(uuidgen)"
+          cleanup_keychain() {
+            security delete-keychain "$SMOKE_KEYCHAIN" >/dev/null 2>&1 || true
+          }
+          trap cleanup_keychain EXIT
+          security create-keychain -p "$SMOKE_KEYCHAIN_PASSWORD" "$SMOKE_KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$SMOKE_KEYCHAIN"
+          security unlock-keychain -p "$SMOKE_KEYCHAIN_PASSWORD" "$SMOKE_KEYCHAIN"
+          security default-keychain -d user -s "$SMOKE_KEYCHAIN"
+          security list-keychains -d user -s "$SMOKE_KEYCHAIN"
+
           chmod +x packaging/macos/build_app.sh packaging/macos/smoke_test.sh
           packaging/macos/build_app.sh
           test -d "dist/股票分析助手.app/Contents/Frameworks/Sparkle.framework"
