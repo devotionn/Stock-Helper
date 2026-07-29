@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { isValidRecordDate, setCurrentRecordDate } from '../dateContext'
 
 const routes = [
   { path: '/', name: 'home', component: () => import('../views/HomeView.vue') },
@@ -13,6 +14,11 @@ const routes = [
 const router = createRouter({
   history: createWebHistory(),
   routes,
+})
+
+router.beforeEach((to) => {
+  const routeDate = String(to.query.date || '')
+  if (isValidRecordDate(routeDate)) setCurrentRecordDate(routeDate)
 })
 
 export default router
