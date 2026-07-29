@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config import settings
 from app.database import get_db, init_database
-from app.routers import analysis, backup, combinations, history, modules, sys_settings
+from app.routers import analysis, backup, combinations, history, modules, sys_settings, workspaces
 
 
 def get_frontend_dist() -> Path:
@@ -98,7 +98,8 @@ async def add_security_headers(request: Request, call_next):
 
 
 app.mount("/uploads", StaticFiles(directory=str(settings.assets_dir)), name="uploads")
-app.include_router(modules.router, prefix="/api/modules", tags=["模块"])
+app.include_router(workspaces.router, prefix="/api/workspaces", tags=["投研日期工作区"])
+app.include_router(modules.router, prefix="/api/modules", tags=["模块（兼容旧版）"])
 app.include_router(combinations.router, prefix="/api/combinations", tags=["常用组合"])
 app.include_router(analysis.router, prefix="/api/analysis", tags=["组合分析"])
 app.include_router(history.router, prefix="/api/history", tags=["历史记录"])

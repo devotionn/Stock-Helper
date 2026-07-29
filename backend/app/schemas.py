@@ -1,12 +1,17 @@
 """Pydantic 请求/响应模型"""
-from pydantic import BaseModel
 from typing import Optional
+
+from pydantic import BaseModel
 
 
 # ---- 模块 ----
 class ModuleDraftUpdate(BaseModel):
     text_content: str
     revision: int
+    display_title: str = ""
+    period_start: Optional[str] = None
+    period_end: Optional[str] = None
+    status: str = "draft"
 
 
 class ModuleDraftOut(BaseModel):
@@ -82,6 +87,7 @@ class AnalysisCreate(BaseModel):
     module_ids: list[int]
     analysis_request: str = ""
     combination_name: str = ""
+    record_date: Optional[str] = None
 
 
 class AnalysisResultItem(BaseModel):
@@ -94,6 +100,7 @@ class AnalysisOut(BaseModel):
     combination: list[int]
     combination_name: str
     analysis_request: str
+    record_date: Optional[str] = None
     status: str
     result_json: Optional[str]
     raw_result: Optional[str]

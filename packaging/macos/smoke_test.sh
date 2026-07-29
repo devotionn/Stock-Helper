@@ -1,5 +1,5 @@
 #!/bin/bash
-# 对最终 PyInstaller 后端、内置前端、SQLite 与可选 macOS Keychain 执行写入型冒烟测试。
+# 对最终 PyInstaller 后端、内置前端、SQLite、投研日期与可选 macOS Keychain 执行写入型冒烟测试。
 set -euo pipefail
 APP_PATH="${1:?用法: smoke_test.sh <app_path> [version]}"
 EXPECTED_VERSION="${2:-1.0.0}"
@@ -42,13 +42,23 @@ SESSION="$(curl --max-time 5 -fsS -H 'Host: 127.0.0.1:8765' http://127.0.0.1:876
 TOKEN="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])' <<<"$SESSION")"
 HEADERS=(-H 'Host: 127.0.0.1:8765' -H "X-Session-Token: $TOKEN" -H 'Content-Type: application/json')
 
-MODULE="$(curl --max-time 5 -fsS "${HEADERS[@]}" http://127.0.0.1:8765/api/modules/0)"
+RECORD_DATE="2026-07-30"
+MODULE="$(curl --max-time 5 -fsS "${HEADERS[@]}" "http://127.0.0.1:8765/api/workspaces/$RECORD_DATE/modules/0")"
 REVISION="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["revision"])' <<<"$MODULE")"
 curl --max-time 5 -fsS -X PUT "${HEADERS[@]}" \
-  -d "{\"text_content\":\"smoke-test-$EXPECTED_VERSION\",\"revision\":$REVISION}" \
-  http://127.0.0.1:8765/api/modules/0 >/dev/null
-VERIFY="$(curl --max-time 5 -fsS "${HEADERS[@]}" http://127.0.0.1:8765/api/modules/0)"
-[[ "$VERIFY" == *"smoke-test-$EXPECTED_VERSION"* ]] || { echo "模块写入验证失败"; exit 1; }
+  -d "{\"text_content\":\"smoke-test-$EXPECTED_VERSION\",\"revision\":$REVISION,\"display_title\":\"\",\"status\":\"draft\"}" \
+  "http://127.0.0.1:8765/api/workspaces/$RECORD_DATE/modules/0" >/dev/null
+VERIFY="$(curl --max-time 5 -fsS "${HEADERS[@]}" "http://127.0.0.1:8765/api/workspaces/$RECORD_DATE/modules/0")"
+[[ "$VERIFY" == *"smoke-test-$EXPECTED_VERSION"* ]] || { echo "日期模块写入验证失败"; exit 1; }
+
+NEXT_DAY="$(curl --max-time 5 -fsS "${HEADERS[@]}" http://127.0.0.1:8765/api/workspaces/2026-07-31/modules/0)"
+[[ "$NEXT_DAY" != *"smoke-test-$EXPECTED_VERSION"* ]] || { echo "不同投研日期发生数据串写"; exit 1; }
+
+CALENDAR="$(curl --max-time 5 -fsS "${HEADERS[@]}" 'http://127.0.0.1:8765/api/workspaces/calendar?month=2026-07')"
+[[ "$CALENDAR" == *'"date":"2026-07-30"'* || "$CALENDAR" == *'"date": "2026-07-30"'* ]] || {
+  echo "月历未返回投研日期状态"
+  exit 1
+}
 
 INDEX="$(curl --max-time 5 -fsS http://127.0.0.1:8765/)"
 [[ "$INDEX" == *'<!DOCTYPE html>'* || "$INDEX" == *'<html'* ]] || { echo "前端首页未正确打包"; exit 1; }
