@@ -1,56 +1,68 @@
 <template>
   <div class="page-container">
-    <h1 class="page-title">组合分析</h1>
+    <div class="analysis-heading">
+      <div>
+        <h1 class="page-title">组合分析</h1>
+        <div class="analysis-date">本次分析使用：{{ formattedRecordDate }}</div>
+      </div>
+      <button class="btn btn-secondary" @click="backToWorkspace">返回该日工作台</button>
+    </div>
 
-    <!-- 第一步：选择模块 -->
+    <section class="card date-warning">
+      <strong>日期说明：</strong>
+      本次只读取 {{ recordDate }} 的模块内容、股票名称和图片，并将该日期写入分析快照。其他日期的数据不会混入。
+    </section>
+
     <section class="card">
       <h2 class="section-title">第一步：选择模块</h2>
-      <p class="section-hint">点击下方模块卡片加入组合，再次点击取消选择</p>
+      <p class="section-hint">点击下方模块卡片加入组合，再次点击取消选择；顺序可在下一步调整。</p>
       <div v-if="loadingCards" class="loading">
         <div class="loading-spinner"></div>
-        <div>正在加载模块...</div>
+        <div>正在加载 {{ formattedRecordDate }} 的模块...</div>
       </div>
       <div v-else class="module-grid">
         <div
           v-for="card in cards"
           :key="card.module_id"
           class="module-card"
-          :class="{ 'has-content': card.has_content, 'selected': isSelected(card.module_id) }"
+          :class="{ 'has-content': card.has_content, selected: isSelected(card.module_id) }"
           @click="toggleModule(card.module_id)"
         >
-          <div class="module-card-number">{{ card.module_id }}</div>
+          <div class="module-card-number">{{ card.module_id + 1 }}</div>
           <div class="module-card-name">{{ card.module_name }}</div>
+          <div v-if="card.display_title" class="module-card-title">{{ card.display_title }}</div>
           <div class="module-card-desc">{{ card.module_desc }}</div>
           <div class="module-card-info">
-            <span class="module-card-status" :class="card.has_content ? 'status-entered' : 'status-empty'">
+            <span :class="['module-card-status', card.has_content ? 'status-entered' : 'status-empty']">
               {{ card.has_content ? '已录入' : '未录入' }}
             </span>
-            <span v-if="card.image_count > 0" class="module-card-images">📷 {{ card.image_count }}张图</span>
+            <span v-if="card.image_count > 0" class="module-card-images">图片 {{ card.image_count }} 张</span>
           </div>
           <div v-if="isSelected(card.module_id)" class="selected-mark">✓ 已选</div>
         </div>
       </div>
     </section>
 
-    <!-- 第二步：调整组合顺序 -->
     <section class="card">
-      <div class="flex items-center justify-between mb-4">
-        <h2 class="section-title">第二步：调整组合顺序</h2>
-        <button v-if="selectedModules.length > 0" class="btn btn-danger btn-sm" @click="clearAll">
-          清空全部
-        </button>
+      <div class="section-toolbar">
+        <div>
+          <h2 class="section-title">第二步：调整组合顺序</h2>
+          <p class="section-hint">AI 将严格按照此顺序读取模块。</p>
+        </div>
+        <button v-if="selectedModules.length" class="btn btn-danger btn-sm" @click="clearAll">清空全部</button>
       </div>
       <div v-if="selectedModules.length === 0" class="empty-state">
-        还未选择任何模块，请从上方点击模块卡片加入组合
+        还未选择任何模块，请从上方点击模块卡片加入组合。
       </div>
       <div v-else class="combination-list">
-        <div v-for="(modId, index) in selectedModules" :key="modId" class="combination-item">
+        <div v-for="(moduleId, index) in selectedModules" :key="moduleId" class="combination-item">
           <div class="combination-order">{{ index + 1 }}</div>
-          <div class="combination-name">{{ getModuleName(modId) }}</div>
-          <div class="flex gap-2">
-            <button class="btn btn-secondary btn-sm" :disabled="index === 0" @click="moveUp(index)">
-              上移
-            </button>
+          <div class="combination-info">
+            <div class="combination-name">{{ getModuleName(moduleId) }}</div>
+            <div v-if="getModuleTitle(moduleId)" class="combination-title">{{ getModuleTitle(moduleId) }}</div>
+          </div>
+          <div class="combination-actions">
+            <button class="btn btn-secondary btn-sm" :disabled="index === 0" @click="moveUp(index)">上移</button>
             <button
               class="btn btn-secondary btn-sm"
               :disabled="index === selectedModules.length - 1"
@@ -58,44 +70,39 @@
             >
               下移
             </button>
-            <button class="btn btn-danger btn-sm" @click="removeModule(modId)">
-              删除
-            </button>
+            <button class="btn btn-danger btn-sm" @click="removeModule(moduleId)">删除</button>
           </div>
         </div>
       </div>
     </section>
 
-    <!-- 常用组合 -->
     <section class="card">
-      <div class="flex items-center justify-between mb-4">
-        <h2 class="section-title">常用组合</h2>
-        <button
-          class="btn btn-secondary"
-          :disabled="selectedModules.length === 0"
-          @click="openSaveModal"
-        >
+      <div class="section-toolbar">
+        <div>
+          <h2 class="section-title">常用组合</h2>
+          <p class="section-hint">常用组合只保存模块编号和顺序，不保存某一天的内容。</p>
+        </div>
+        <button class="btn btn-secondary" :disabled="!selectedModules.length" @click="openSaveModal">
           保存为常用组合
         </button>
       </div>
-      <div v-if="combinations.length === 0" class="empty-state">
-        暂无常用组合，选择模块后可保存
-      </div>
+      <div v-if="combinations.length === 0" class="empty-state">暂无常用组合。</div>
       <div v-else class="combination-list">
-        <div v-for="comb in combinations" :key="comb.id" class="combination-item">
+        <div v-for="combination in combinations" :key="combination.id" class="combination-item">
           <div class="combination-info">
-            <div class="combination-name">{{ comb.name }}</div>
-            <div class="combination-modules">{{ comb.module_ids.map(getModuleName).join(' -> ') }}</div>
+            <div class="combination-name">{{ combination.name }}</div>
+            <div class="combination-modules">
+              {{ combination.module_ids.map(getModuleName).join(' → ') }}
+            </div>
           </div>
-          <div class="flex gap-2">
-            <button class="btn btn-primary btn-sm" @click="useCombination(comb)">使用</button>
-            <button class="btn btn-danger btn-sm" @click="deleteCombination(comb.id)">删除</button>
+          <div class="combination-actions">
+            <button class="btn btn-primary btn-sm" @click="useCombination(combination)">使用</button>
+            <button class="btn btn-danger btn-sm" @click="deleteCombination(combination.id)">删除</button>
           </div>
         </div>
       </div>
     </section>
 
-    <!-- 第三步：分析要求 -->
     <section class="card">
       <h2 class="section-title">第三步：填写分析要求（可选）</h2>
       <div class="form-group">
@@ -108,21 +115,19 @@
       </div>
     </section>
 
-    <!-- 开始分析 -->
     <section class="card text-center">
       <button
         class="btn btn-primary btn-lg w-full"
         :disabled="selectedModules.length === 0 || analyzing"
         @click="startAnalysis"
       >
-        {{ analyzing ? 'AI分析中...' : '开始分析' }}
+        {{ analyzing ? '正在提交...' : `开始分析 ${recordDate}` }}
       </button>
       <p v-if="selectedModules.length === 0 && !analyzing" class="text-secondary mt-2">
-        请先选择至少一个模块
+        请先选择至少一个模块。
       </p>
     </section>
 
-    <!-- 保存组合模态框 -->
     <div v-if="showSaveModal" class="modal-overlay" @click.self="showSaveModal = false">
       <div class="modal">
         <div class="modal-title">保存为常用组合</div>
@@ -144,7 +149,6 @@
       </div>
     </div>
 
-    <!-- 确认模态框 -->
     <div v-if="confirmModal.show" class="modal-overlay" @click.self="confirmModal.show = false">
       <div class="modal">
         <div class="modal-title">{{ confirmModal.title }}</div>
@@ -156,30 +160,36 @@
       </div>
     </div>
 
-    <!-- 分析中加载遮罩 -->
     <div v-if="analyzing" class="modal-overlay analyzing-overlay">
       <div class="analyzing-box">
         <div class="loading-spinner"></div>
-        <div class="analyzing-text">AI正在分析中，请耐心等待...</div>
-        <div class="analyzing-sub">分析可能需要30-120秒，请勿关闭页面</div>
+        <div class="analyzing-text">正在提交 {{ recordDate }} 的分析任务...</div>
+        <div class="analyzing-sub">提交成功后会自动进入结果页面，AI 在后台完成分析。</div>
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, inject, onMounted } from 'vue'
-import { useRouter, useRoute } from 'vue-router'
-import { modulesApi, combinationsApi, analysisApi } from '../api'
+import { computed, inject, onMounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { analysisApi, combinationsApi, modulesApi } from '../api'
+import {
+  currentRecordDate,
+  formatRecordDate,
+  isValidRecordDate,
+  setCurrentRecordDate,
+} from '../dateContext'
 
 const router = useRouter()
 const route = useRoute()
 const showToast = inject('toast')
+const recordDate = currentRecordDate
+const formattedRecordDate = computed(() => formatRecordDate(recordDate.value))
 
 const MODULE_NAMES = [
-  '一周策略', '股票1', '股票2', '股票3', '股票4',
-  '技术派观点', '钱说观点', '大盘走势', '反向操作',
-  'AI复盘', '行业板块', '操作建议',
+  '一周策略', '股票1', '股票2', '股票3', '股票4', '技术派观点',
+  '钱说观点', '大盘走势', '反向操作', 'AI复盘', '行业板块', '操作建议',
 ]
 
 const cards = ref([])
@@ -188,24 +198,29 @@ const selectedModules = ref([])
 const combinations = ref([])
 const analysisRequest = ref('')
 const analyzing = ref(false)
-
 const showSaveModal = ref(false)
 const newCombinationName = ref('')
 const confirmModal = ref({ show: false, title: '', message: '', onConfirm: null })
 
+function getCard(id) {
+  return cards.value.find((card) => card.module_id === id)
+}
+
 function getModuleName(id) {
-  const card = cards.value.find((c) => c.module_id === id)
-  if (card) return card.module_name
-  return MODULE_NAMES[id] || `模块${id}`
+  return getCard(id)?.module_name || MODULE_NAMES[id] || `模块${id + 1}`
+}
+
+function getModuleTitle(id) {
+  return getCard(id)?.display_title || ''
 }
 
 async function loadCards() {
   loadingCards.value = true
   try {
-    const res = await modulesApi.getCards()
-    cards.value = res.data
-  } catch (e) {
-    showToast('加载模块失败', 'error')
+    const response = await modulesApi.getCards(recordDate.value)
+    cards.value = response.data
+  } catch (error) {
+    showToast(error.response?.data?.detail || '加载模块失败', 'error')
   } finally {
     loadingCards.value = false
   }
@@ -213,20 +228,17 @@ async function loadCards() {
 
 async function loadCombinations() {
   try {
-    const res = await combinationsApi.list()
-    combinations.value = res.data
-  } catch (e) {
+    const response = await combinationsApi.list()
+    combinations.value = response.data
+  } catch {
     showToast('加载常用组合失败', 'error')
   }
 }
 
 function toggleModule(id) {
-  const idx = selectedModules.value.indexOf(id)
-  if (idx >= 0) {
-    selectedModules.value.splice(idx, 1)
-  } else {
-    selectedModules.value.push(id)
-  }
+  const index = selectedModules.value.indexOf(id)
+  if (index >= 0) selectedModules.value.splice(index, 1)
+  else selectedModules.value.push(id)
 }
 
 function isSelected(id) {
@@ -234,29 +246,26 @@ function isSelected(id) {
 }
 
 function moveUp(index) {
-  if (index === 0) return
-  const arr = selectedModules.value
-  const tmp = arr[index - 1]
-  arr[index - 1] = arr[index]
-  arr[index] = tmp
+  if (index <= 0) return
+  const values = [...selectedModules.value]
+  ;[values[index - 1], values[index]] = [values[index], values[index - 1]]
+  selectedModules.value = values
 }
 
 function moveDown(index) {
-  const arr = selectedModules.value
-  if (index === arr.length - 1) return
-  const tmp = arr[index + 1]
-  arr[index + 1] = arr[index]
-  arr[index] = tmp
+  if (index >= selectedModules.value.length - 1) return
+  const values = [...selectedModules.value]
+  ;[values[index], values[index + 1]] = [values[index + 1], values[index]]
+  selectedModules.value = values
 }
 
 function removeModule(id) {
   confirmModal.value = {
     show: true,
     title: '移除模块',
-    message: `确定要从组合中移除"${getModuleName(id)}"吗？`,
+    message: `确定要从组合中移除“${getModuleName(id)}”吗？`,
     onConfirm: () => {
-      const idx = selectedModules.value.indexOf(id)
-      if (idx >= 0) selectedModules.value.splice(idx, 1)
+      selectedModules.value = selectedModules.value.filter((moduleId) => moduleId !== id)
       confirmModal.value.show = false
       showToast('已移除', 'success')
     },
@@ -276,13 +285,13 @@ function clearAll() {
   }
 }
 
-function useCombination(comb) {
-  selectedModules.value = [...comb.module_ids]
-  showToast(`已载入组合"${comb.name}"`, 'success')
+function useCombination(combination) {
+  selectedModules.value = [...combination.module_ids]
+  showToast(`已载入组合“${combination.name}”`, 'success')
 }
 
 function openSaveModal() {
-  if (selectedModules.value.length === 0) {
+  if (!selectedModules.value.length) {
     showToast('请先选择模块', 'warning')
     return
   }
@@ -301,23 +310,23 @@ async function saveCombination() {
     showToast('保存成功', 'success')
     showSaveModal.value = false
     await loadCombinations()
-  } catch (e) {
-    showToast('保存失败', 'error')
+  } catch (error) {
+    showToast(error.response?.data?.detail || '保存失败', 'error')
   }
 }
 
-function deleteCombination(combId) {
+function deleteCombination(combinationId) {
   confirmModal.value = {
     show: true,
     title: '删除组合',
     message: '确定要删除这个常用组合吗？',
     onConfirm: async () => {
       try {
-        await combinationsApi.delete(combId)
+        await combinationsApi.delete(combinationId)
         showToast('已删除', 'success')
         await loadCombinations()
-      } catch (e) {
-        showToast('删除失败', 'error')
+      } catch (error) {
+        showToast(error.response?.data?.detail || '删除失败', 'error')
       }
       confirmModal.value.show = false
     },
@@ -325,69 +334,95 @@ function deleteCombination(combId) {
 }
 
 async function startAnalysis() {
-  if (selectedModules.value.length === 0) {
+  if (!selectedModules.value.length) {
     showToast('请先选择模块', 'warning')
     return
   }
   if (analyzing.value) return
   analyzing.value = true
   try {
-    const res = await analysisApi.create(selectedModules.value, analysisRequest.value, '')
-    const data = res.data
-    // 后端返回 202 + { id, status: "pending" }，不再等待分析完成，立即跳转由 ResultView 轮询
-    showToast('分析已提交，正在处理中...', 'success')
-    router.push(`/result/${data.id}`)
-  } catch (e) {
+    const response = await analysisApi.create(
+      selectedModules.value,
+      analysisRequest.value,
+      '',
+      recordDate.value,
+    )
+    showToast(`已提交 ${recordDate.value} 的分析任务`, 'success')
+    router.push({ path: `/result/${response.data.id}`, query: { date: recordDate.value } })
+  } catch (error) {
     analyzing.value = false
-    const msg = e.response?.data?.detail || e.message || '请求失败'
-    showToast('分析启动失败：' + msg, 'error')
+    showToast('分析启动失败：' + (error.response?.data?.detail || error.message || '请求失败'), 'error')
   }
 }
 
+function backToWorkspace() {
+  router.push({ path: '/', query: { date: recordDate.value } })
+}
+
 onMounted(() => {
+  const queryDate = String(route.query.date || '')
+  if (isValidRecordDate(queryDate)) setCurrentRecordDate(queryDate)
+  const combination = String(route.query.combination || '')
+  if (combination) {
+    selectedModules.value = combination
+      .split(',')
+      .map((value) => Number.parseInt(value.trim(), 10))
+      .filter((value) => Number.isInteger(value) && value >= 0 && value <= 11)
+  }
+  if (route.query.request) analysisRequest.value = String(route.query.request)
   loadCards()
   loadCombinations()
-  // 支持从历史记录“重新分析”跳转，预填模块组合
-  const comb = route.query.combination
-  if (comb) {
-    selectedModules.value = String(comb)
-      .split(',')
-      .map((s) => parseInt(s.trim(), 10))
-      .filter((n) => !isNaN(n) && n >= 0 && n <= 11)
-  }
-  // 预填分析要求
-  const req = route.query.request
-  if (req) {
-    analysisRequest.value = String(req)
-  }
 })
 </script>
 
 <style scoped>
+.analysis-heading,
+.section-toolbar,
+.combination-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.analysis-date {
+  color: var(--primary);
+  font-size: 18px;
+  font-weight: 700;
+  margin-top: -12px;
+  margin-bottom: 20px;
+}
+.date-warning {
+  background: #eef4ff;
+  border-left: 5px solid var(--primary);
+  line-height: 1.8;
+}
 .section-title {
   font-size: var(--font-size-xl);
   font-weight: 700;
   margin-bottom: 8px;
   color: var(--text);
 }
-
 .section-hint {
   font-size: var(--font-size-base);
   color: var(--text-secondary);
   margin-bottom: 20px;
 }
-
 .module-card.selected {
   border-color: var(--primary);
   background: #e8f0fe;
   box-shadow: 0 4px 12px rgba(26, 115, 232, 0.25);
 }
-
-.module-card-images {
+.module-card-title,
+.combination-title {
+  color: var(--primary);
+  font-weight: 700;
+}
+.module-card-images,
+.combination-modules {
   font-size: 16px;
   color: var(--text-secondary);
 }
-
 .selected-mark {
   position: absolute;
   bottom: 12px;
@@ -399,7 +434,6 @@ onMounted(() => {
   font-size: 16px;
   font-weight: 600;
 }
-
 .combination-info {
   flex: 1;
   display: flex;
@@ -407,39 +441,23 @@ onMounted(() => {
   gap: 4px;
   min-width: 0;
 }
-
-.combination-modules {
-  font-size: 16px;
-  color: var(--text-secondary);
-  word-break: break-all;
+.combination-actions {
+  justify-content: flex-end;
 }
-
-.analyzing-overlay {
-  background: rgba(0, 0, 0, 0.7);
-}
-
+.analyzing-overlay { background: rgba(0, 0, 0, 0.7); }
 .analyzing-box {
   background: #fff;
   border-radius: var(--radius);
   padding: 48px 40px;
   text-align: center;
-  max-width: 480px;
+  max-width: 520px;
   width: 90%;
 }
-
-.analyzing-box .loading-spinner {
-  margin: 0 auto 20px;
-}
-
-.analyzing-text {
-  font-size: var(--font-size-xl);
-  font-weight: 700;
-  color: var(--text);
-  margin-bottom: 8px;
-}
-
-.analyzing-sub {
-  font-size: var(--font-size-base);
-  color: var(--text-secondary);
+.analyzing-box .loading-spinner { margin: 0 auto 24px; }
+.analyzing-text { font-size: var(--font-size-xl); font-weight: 600; margin-bottom: 12px; }
+.analyzing-sub { font-size: var(--font-size-base); color: var(--text-secondary); }
+@media (max-width: 720px) {
+  .combination-item { align-items: flex-start; }
+  .combination-actions { width: 100%; }
 }
 </style>
