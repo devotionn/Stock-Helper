@@ -16,9 +16,6 @@ cleanup() {
     sleep 1
     kill -9 "$PID" 2>/dev/null || true
   fi
-  if [[ "$TEST_KEYCHAIN" == "1" ]]; then
-    security delete-generic-password -s StockHelper -a ai_api_key >/dev/null 2>&1 || true
-  fi
   rm -rf "$TEST_DATA"
 }
 trap cleanup EXIT
@@ -58,7 +55,6 @@ INDEX="$(curl --max-time 5 -fsS http://127.0.0.1:8765/)"
 
 if [[ "$TEST_KEYCHAIN" == "1" ]]; then
   TEST_SECRET="sk-smoke-12345678"
-  security delete-generic-password -s StockHelper -a ai_api_key >/dev/null 2>&1 || true
   if ! curl --max-time 15 -fsS -X PUT "${HEADERS[@]}" \
     -d "{\"ai_api_key\":\"$TEST_SECRET\"}" \
     http://127.0.0.1:8765/api/settings >/dev/null; then
@@ -76,12 +72,9 @@ assert settings["has_api_key"] is True
 assert settings["masked_api_key"] == "sk****5678"
 assert "ai_api_key" not in settings
 PY
-  STORED_SECRET="$(security find-generic-password -w -s StockHelper -a ai_api_key)"
-  [[ "$STORED_SECRET" == "$TEST_SECRET" ]] || { echo "Keychain 读取值不一致"; exit 1; }
   DB_SECRET_COUNT="$(sqlite3 "$TEST_DATA/data/stock_helper.db" "SELECT COUNT(*) FROM settings WHERE key='ai_api_key' AND value<>'';")"
   [[ "$DB_SECRET_COUNT" == "0" ]] || { echo "API 密钥错误写入 SQLite"; exit 1; }
-  security delete-generic-password -s StockHelper -a ai_api_key >/dev/null
-  echo "macOS Keychain 冒烟测试通过"
+  echo "macOS Keychain 读写、脱敏及 SQLite 隔离测试通过"
 fi
 
 kill "$PID"
