@@ -45,7 +45,7 @@
         </div>
 
         <div v-if="images.length" class="image-grid">
-          <div v-for="img in images" :key="img.id" class="image-item">
+          <div v-for="(img, index) in images" :key="img.id" class="image-item">
             <div class="image-thumb">
               <img
                 :src="assetUrl(img.thumbnail_path || img.relative_path)"
@@ -53,6 +53,18 @@
                 alt="缩略图"
               />
               <button class="delete-btn" title="删除图片" @click.stop="confirmDelete(img)">×</button>
+            </div>
+            <div class="image-sort">
+              <button
+                class="btn btn-secondary btn-sm"
+                :disabled="index === 0"
+                @click="moveImage(index, -1)"
+              >↑ 上移</button>
+              <button
+                class="btn btn-secondary btn-sm"
+                :disabled="index === images.length - 1"
+                @click="moveImage(index, 1)"
+              >↓ 下移</button>
             </div>
             <input
               v-model="img.caption"
@@ -260,6 +272,21 @@ async function saveCaption(img) {
   }
 }
 
+// ---- 图片排序 ----
+async function moveImage(index, direction) {
+  const newIndex = index + direction
+  if (newIndex < 0 || newIndex >= images.value.length) return
+  const arr = images.value
+  ;[arr[index], arr[newIndex]] = [arr[newIndex], arr[index]]
+  images.value = [...arr]
+  try {
+    await modulesApi.reorderImages(moduleId.value, images.value.map((i) => i.id))
+    showToast('排序已更新', 'success')
+  } catch (e) {
+    showToast('排序保存失败', 'error')
+  }
+}
+
 // ---- 删除图片 ----
 function confirmDelete(img) {
   deleteTarget.value = img
@@ -333,6 +360,14 @@ onBeforeUnmount(() => {
   margin-top: 8px;
   font-size: 16px;
   padding: 8px 10px;
+}
+.image-sort {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+}
+.image-sort .btn {
+  flex: 1;
 }
 .save-status {
   font-size: var(--font-size-lg);

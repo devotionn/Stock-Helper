@@ -40,6 +40,8 @@ export const analysisApi = {
   getDetail: (id) => api.get(`/analysis/${id}/detail`),
   saveToModule: (analysisId, moduleId, content) =>
     api.post('/analysis/save-to-module', { analysis_id: analysisId, module_id: moduleId, content }),
+  updateReview: (id, reviewContent) =>
+    api.put(`/analysis/${id}/review`, { review_content: reviewContent }),
 }
 
 // ---- 历史记录 ----

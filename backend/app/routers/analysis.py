@@ -1,6 +1,7 @@
 """组合分析 API"""
 import json
 import asyncio
+from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from ..database import get_db
 from ..config import MODULES
@@ -176,6 +177,9 @@ def get_analysis_detail(analysis_id: int):
                 "created_at": analysis["created_at"],
                 "started_at": analysis["started_at"],
                 "completed_at": analysis["completed_at"],
+                "saved_to_review": analysis["saved_to_review"],
+                "saved_to_advice": analysis["saved_to_advice"],
+                "review_content": analysis["review_content"] or "",
             },
             "snapshots": snap_list,
             "notes": [{"id": r["id"], "note": r["note"], "created_at": r["created_at"]}
@@ -209,5 +213,35 @@ def save_to_module(body: SaveToModuleRequest):
             "updated_at=datetime('now','localtime') WHERE module_id=?",
             (new_text, body.module_id),
         )
+        # 回写分析记录的保存标记
+        if body.module_id == 9:
+            conn.execute(
+                "UPDATE analyses SET saved_to_review=1 WHERE id=?",
+                (body.analysis_id,),
+            )
+        else:
+            conn.execute(
+                "UPDATE analyses SET saved_to_advice=1 WHERE id=?",
+                (body.analysis_id,),
+            )
 
     return {"message": "已保存", "revision": draft["revision"] + 1}
+
+
+class ReviewContentUpdate(BaseModel):
+    """后续复盘内容更新"""
+    review_content: str
+
+
+@router.put("/{analysis_id}/review")
+def update_review_content(analysis_id: int, body: ReviewContentUpdate):
+    """更新历史记录的后续复盘内容"""
+    with get_db() as conn:
+        row = conn.execute("SELECT id FROM analyses WHERE id=?", (analysis_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="分析记录不存在")
+        conn.execute(
+            "UPDATE analyses SET review_content=? WHERE id=?",
+            (body.review_content, analysis_id),
+        )
+    return {"message": "复盘内容已保存"}

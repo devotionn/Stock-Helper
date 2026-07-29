@@ -358,6 +358,11 @@ onMounted(() => {
       .map((s) => parseInt(s.trim(), 10))
       .filter((n) => !isNaN(n) && n >= 0 && n <= 11)
   }
+  // 预填分析要求
+  const req = route.query.request
+  if (req) {
+    analysisRequest.value = String(req)
+  }
 })
 </script>
 

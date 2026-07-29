@@ -52,8 +52,11 @@
         <h2 class="section-title">备份设置</h2>
         <div class="form-group">
           <label class="form-label">备份位置</label>
-          <input type="text" class="form-input" :value="form.backup_location" readonly />
+          <input type="text" class="form-input" v-model="form.backup_location" placeholder="例如：D:\Backups" />
         </div>
+        <button class="btn btn-primary mb-4" :disabled="savingBackupLocation" @click="saveBackupLocation">
+          {{ savingBackupLocation ? '保存中...' : '保存备份位置' }}
+        </button>
 
         <button class="btn btn-success btn-lg w-full" :disabled="backingUp" @click="createBackup">
           {{ backingUp ? '正在备份...' : '一键备份' }}
@@ -128,6 +131,7 @@ const form = reactive({
 
 const savingAI = ref(false)
 const savingFont = ref(false)
+const savingBackupLocation = ref(false)
 const backingUp = ref(false)
 const backupResult = ref(null)
 const backupList = ref([])
@@ -184,6 +188,18 @@ async function saveFont() {
     showToast('保存失败：' + (e.response?.data?.message || e.message), 'error')
   } finally {
     savingFont.value = false
+  }
+}
+
+async function saveBackupLocation() {
+  savingBackupLocation.value = true
+  try {
+    await settingsApi.update({ backup_location: form.backup_location })
+    showToast('备份位置已保存', 'success')
+  } catch (e) {
+    showToast('保存失败：' + (e.response?.data?.message || e.message), 'error')
+  } finally {
+    savingBackupLocation.value = false
   }
 }
 

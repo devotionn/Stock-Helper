@@ -125,6 +125,9 @@ def get_history_detail(analysis_id: int):
                 "created_at": analysis["created_at"],
                 "started_at": analysis["started_at"],
                 "completed_at": analysis["completed_at"],
+                "saved_to_review": analysis["saved_to_review"],
+                "saved_to_advice": analysis["saved_to_advice"],
+                "review_content": analysis["review_content"] or "",
             },
             "snapshots": snap_list,
             "notes": [{"id": r["id"], "note": r["note"], "created_at": r["created_at"]}

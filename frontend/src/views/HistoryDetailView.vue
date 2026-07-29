@@ -39,6 +39,17 @@
           <span class="info-label">分析要求：</span>
           <span>{{ analysis.analysis_request || '无' }}</span>
         </div>
+        <div class="info-row">
+          <span class="info-label">保存状态：</span>
+          <div class="save-tags">
+            <span :class="['save-tag', analysis.saved_to_review ? 'tag-saved' : 'tag-unsaved']">
+              {{ analysis.saved_to_review ? '已保存到AI复盘' : '未保存到AI复盘' }}
+            </span>
+            <span :class="['save-tag', analysis.saved_to_advice ? 'tag-saved' : 'tag-unsaved']">
+              {{ analysis.saved_to_advice ? '已保存到操作建议' : '未保存到操作建议' }}
+            </span>
+          </div>
+        </div>
         <div v-if="analysis.error_message" class="error-message">
           错误信息：{{ analysis.error_message }}
         </div>
@@ -81,6 +92,17 @@
         <div class="analysis-section">
           <div class="analysis-section-content">{{ analysis.raw_result }}</div>
         </div>
+      </div>
+
+      <!-- 后续复盘 -->
+      <div class="card">
+        <h2 class="section-title">后续复盘</h2>
+        <div class="form-group">
+          <textarea class="form-textarea" v-model="reviewContent" placeholder="输入后续复盘内容..." rows="6"></textarea>
+        </div>
+        <button class="btn btn-primary" :disabled="savingReview" @click="saveReview">
+          {{ savingReview ? '保存中...' : '保存复盘' }}
+        </button>
       </div>
 
       <!-- 免责声明 -->
@@ -140,7 +162,7 @@
 <script setup>
 import { ref, computed, onMounted, inject } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { historyApi, assetUrl } from '../api'
+import { historyApi, analysisApi, assetUrl } from '../api'
 
 const router = useRouter()
 const route = useRoute()
@@ -171,6 +193,8 @@ const notes = ref([])
 const previewImage = ref(null)
 const noteText = ref('')
 const savingNote = ref(false)
+const reviewContent = ref('')
+const savingReview = ref(false)
 
 const showDeleteModal = ref(false)
 const deleteConfirmText = ref('')
@@ -208,6 +232,7 @@ async function fetchDetail() {
     if (notes.value.length) {
       noteText.value = notes.value[0].note
     }
+    reviewContent.value = data.analysis.review_content || ''
   } catch (e) {
     showToast('加载详情失败：' + (e.response?.data?.message || e.message), 'error')
   } finally {
@@ -229,9 +254,26 @@ async function saveNote() {
   }
 }
 
+async function saveReview() {
+  if (savingReview.value) return
+  savingReview.value = true
+  try {
+    await analysisApi.updateReview(id, reviewContent.value)
+    showToast('复盘保存成功', 'success')
+  } catch (e) {
+    showToast('保存失败：' + (e.response?.data?.message || e.message), 'error')
+  } finally {
+    savingReview.value = false
+  }
+}
+
 function reAnalyze() {
   if (analysis.value && analysis.value.combination && analysis.value.combination.length) {
-    router.push({ path: '/analysis', query: { combination: analysis.value.combination.join(',') } })
+    const query = { combination: analysis.value.combination.join(',') }
+    if (analysis.value.analysis_request) {
+      query.request = analysis.value.analysis_request
+    }
+    router.push({ path: '/analysis', query })
   } else {
     router.push('/analysis')
   }
@@ -383,6 +425,30 @@ onMounted(() => {
 }
 
 .status-pending {
+  background: #f1f3f4;
+  color: var(--text-secondary);
+}
+
+.save-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.save-tag {
+  display: inline-block;
+  padding: 4px 14px;
+  border-radius: 20px;
+  font-size: var(--font-size-base);
+  font-weight: 600;
+}
+
+.tag-saved {
+  background: #e6f4ea;
+  color: var(--success);
+}
+
+.tag-unsaved {
   background: #f1f3f4;
   color: var(--text-secondary);
 }

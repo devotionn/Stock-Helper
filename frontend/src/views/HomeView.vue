@@ -35,6 +35,13 @@
         >
           {{ card.has_content ? '已录入' : '未录入' }}
         </span>
+        <button
+          class="btn btn-primary btn-sm"
+          style="width: 100%"
+          @click.stop="goToModule(card.module_id)"
+        >
+          查看 / 编辑
+        </button>
       </div>
     </div>
   </div>

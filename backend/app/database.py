@@ -85,7 +85,10 @@ CREATE TABLE IF NOT EXISTS analyses (
     error_message   TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
     started_at      TEXT,
-    completed_at    TEXT
+    completed_at    TEXT,
+    saved_to_review INTEGER NOT NULL DEFAULT 0,   -- 是否已保存到AI复盘(9号)
+    saved_to_advice INTEGER NOT NULL DEFAULT 0,   -- 是否已保存到操作建议(11号)
+    review_content TEXT DEFAULT ''                -- 后续复盘内容
 );
 
 -- 分析模块快照表（分析时各模块的内容快照）
@@ -177,9 +180,17 @@ def get_db() -> Generator[sqlite3.Connection, None, None]:
 
 
 def init_database():
-    """初始化数据库：建表 + 插入12个模块草稿"""
+    """初始化数据库：建表 + 迁移 + 插入12个模块草稿"""
     with get_db() as conn:
         conn.executescript(_SCHEMA)
+        # 迁移：为已有数据库添加新字段（如果不存在）
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(analyses)").fetchall()}
+        if "saved_to_review" not in columns:
+            conn.execute("ALTER TABLE analyses ADD COLUMN saved_to_review INTEGER NOT NULL DEFAULT 0")
+        if "saved_to_advice" not in columns:
+            conn.execute("ALTER TABLE analyses ADD COLUMN saved_to_advice INTEGER NOT NULL DEFAULT 0")
+        if "review_content" not in columns:
+            conn.execute("ALTER TABLE analyses ADD COLUMN review_content TEXT DEFAULT ''")
         # 初始化12个模块草稿行
         for m in MODULES:
             conn.execute(
