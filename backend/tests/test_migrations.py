@@ -65,7 +65,8 @@ def make_old_v1_database(path: Path) -> None:
             applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         INSERT INTO schema_version(version, description) VALUES (1, 'old');
-        INSERT INTO module_drafts(module_id, text_content) VALUES (0, '必须保留的数据');
+        INSERT INTO module_drafts(module_id, text_content, revision, updated_at)
+        VALUES (0, '必须保留的数据', 3, '2026-07-20 10:00:00');
         INSERT INTO analyses(combination, status) VALUES ('[0]', 'completed');
         INSERT INTO draft_assets(module_id, asset_id, order_index) VALUES (0, 7, 1);
         INSERT INTO draft_assets(module_id, asset_id, order_index) VALUES (0, 7, 2);
@@ -82,8 +83,9 @@ def test_fresh_database_is_initialized(tmp_path):
     backup = database.init_database()
     assert backup is None
     with database.get_db() as conn:
-        assert conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 4
+        assert conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 5
         assert conn.execute("SELECT COUNT(*) FROM module_drafts").fetchone()[0] == 12
+        assert conn.execute("SELECT COUNT(*) FROM module_entries").fetchone()[0] == 12
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
 
@@ -96,22 +98,38 @@ def test_old_database_is_backed_up_migrated_and_preserved(tmp_path):
 
     assert backup is not None and backup.exists()
     with database.get_db() as conn:
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(analyses)")}
-        assert {"saved_to_review", "saved_to_advice", "review_content"} <= columns
+        analysis_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(analyses)")
+        }
+        assert {
+            "saved_to_review",
+            "saved_to_advice",
+            "review_content",
+            "record_date",
+        } <= analysis_columns
         assert "image_order_index" in {
             row[1] for row in conn.execute("PRAGMA table_info(analysis_assets)")
         }
         assert conn.execute(
             "SELECT text_content FROM module_drafts WHERE module_id=0"
         ).fetchone()[0] == "必须保留的数据"
+        migrated = conn.execute(
+            "SELECT record_date, text_content, revision FROM module_entries WHERE module_id=0"
+        ).fetchone()
+        assert migrated["record_date"] == "2026-07-20"
+        assert migrated["text_content"] == "必须保留的数据"
+        assert migrated["revision"] == 3
         assert conn.execute("SELECT COUNT(*) FROM draft_assets").fetchone()[0] == 1
-        assert conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 4
+        assert conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 5
 
     backup_conn = sqlite3.connect(backup)
     try:
         assert backup_conn.execute(
             "SELECT text_content FROM module_drafts WHERE module_id=0"
         ).fetchone()[0] == "必须保留的数据"
+        assert backup_conn.execute(
+            "SELECT MAX(version) FROM schema_version"
+        ).fetchone()[0] == 1
     finally:
         backup_conn.close()
 
@@ -122,7 +140,7 @@ def test_false_version_record_is_repaired(tmp_path):
     configure_paths(database, tmp_path)
     make_old_v1_database(database.settings.db_path)
     conn = sqlite3.connect(database.settings.db_path)
-    conn.execute("INSERT INTO schema_version(version, description) VALUES (4, '错误标记')")
+    conn.execute("INSERT INTO schema_version(version, description) VALUES (5, '错误标记')")
     conn.commit()
     conn.close()
 
@@ -130,8 +148,16 @@ def test_false_version_record_is_repaired(tmp_path):
     assert backup is not None
     conn = sqlite3.connect(database.settings.db_path)
     try:
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(analyses)")}
-        assert "review_content" in columns
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert {"module_entries", "entry_assets"}.issubset(tables)
+        assert "record_date" in {
+            row[1] for row in conn.execute("PRAGMA table_info(analyses)")
+        }
     finally:
         conn.close()
 
@@ -152,7 +178,7 @@ def test_failed_migration_leaves_live_database_untouched(tmp_path, monkeypatch):
     monkeypatch.setattr(
         database,
         "MIGRATIONS",
-        original_migrations + ((5, "故意失败", fail),),
+        original_migrations + ((6, "故意失败", fail),),
     )
 
     with pytest.raises(database.MigrationError):
@@ -163,7 +189,7 @@ def test_failed_migration_leaves_live_database_untouched(tmp_path, monkeypatch):
         assert conn.execute(
             "SELECT text_content FROM module_drafts WHERE module_id=0"
         ).fetchone()[0] == "原始数据"
-        assert conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 4
+        assert conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 5
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     finally:
         conn.close()
