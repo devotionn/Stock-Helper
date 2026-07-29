@@ -1,17 +1,39 @@
 """应用配置"""
 import os
+import sys
 from pathlib import Path
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
+
+
+def _get_data_dir() -> Path:
+    """根据操作系统选择数据目录。可通过 STOCK_DATA_DIR 环境变量覆盖（开发时用）。"""
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Stock Helper"
+    elif sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
+        return Path(local) / "Stock Helper"
+    else:
+        return Path.home() / ".local" / "share" / "stock-helper"
 
 
 class Settings(BaseSettings):
     # 基础路径
-    base_dir: Path = Path(__file__).resolve().parent.parent
-    data_dir: Path = base_dir / "data"
+    base_dir: Path = Path(__file__).resolve().parent.parent  # 后端代码目录，用于找前端 dist 等
+    data_dir: Path = _get_data_dir()
     db_path: Path = data_dir / "stock_helper.db"
     assets_dir: Path = data_dir / "assets"
     temp_dir: Path = data_dir / "temp"
     backup_dir: Path = data_dir / "backups"
+
+    @model_validator(mode="after")
+    def _rederive_paths(self):
+        """当 STOCK_DATA_DIR 覆盖 data_dir 后，重新派生子路径，保证一致"""
+        self.db_path = self.data_dir / "stock_helper.db"
+        self.assets_dir = self.data_dir / "assets"
+        self.temp_dir = self.data_dir / "temp"
+        self.backup_dir = self.data_dir / "backups"
+        return self
 
     # 服务器配置
     host: str = "127.0.0.1"

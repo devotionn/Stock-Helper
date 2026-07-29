@@ -10,6 +10,7 @@ from typing import Optional
 from PIL import Image
 from ..config import settings
 from ..database import get_db
+from .secret_store import get_secret_store
 
 # 固定系统提示词
 SYSTEM_PROMPT = """你是一个专业的股票分析助手。你将收到用户选择的多个模块的内容（文字和图片），按照模块排列顺序进行分析。
@@ -33,15 +34,16 @@ SYSTEM_PROMPT = """你是一个专业的股票分析助手。你将收到用户�
 
 
 def get_ai_config() -> dict:
-    """从数据库获取AI配置"""
+    """获取AI配置：API密钥从SecretStore读取，其余从数据库"""
+    secret_store = get_secret_store()
     with get_db() as conn:
         row = conn.execute(
-            "SELECT key, value FROM settings WHERE key IN ('ai_api_url', 'ai_api_key', 'ai_model')"
+            "SELECT key, value FROM settings WHERE key IN ('ai_api_url', 'ai_model')"
         ).fetchall()
         cfg = {r["key"]: r["value"] for r in row}
     return {
         "api_url": cfg.get("ai_api_url", ""),
-        "api_key": cfg.get("ai_api_key", ""),
+        "api_key": secret_store.get_secret("ai_api_key") or "",
         "model": cfg.get("ai_model", ""),
     }
 
@@ -103,6 +105,7 @@ def build_analysis_input(module_snapshots: list[dict], analysis_request: str, as
     max_images = settings.ai_max_images
 
     for snap in module_snapshots:
+        # 文字始终添加（不受图片数量限制影响）
         content.append({
             "type": "text",
             "text": f"【模块{snap['order_index']+1}：{snap['module_name']}】\n{snap['text_content'] or '（无文字内容）'}"
@@ -118,9 +121,8 @@ def build_analysis_input(module_snapshots: list[dict], analysis_request: str, as
                     "image_url": {"url": data_uri}
                 })
                 image_count += 1
-        if image_count >= max_images:
-            break
 
+    # 分析要求始终添加
     if analysis_request:
         content.append({
             "type": "text",

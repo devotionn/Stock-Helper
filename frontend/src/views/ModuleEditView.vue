@@ -108,7 +108,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount, inject } from 'vue'
 import { useRouter } from 'vue-router'
-import { modulesApi, assetUrl } from '../api'
+import { modulesApi, assetUrl, getSessionToken } from '../api'
 
 const props = defineProps({
   id: { type: [String, Number], required: true },
@@ -324,10 +324,13 @@ function goBack() {
 function handleBeforeUnload() {
   if (textContent.value !== lastSavedText && !saving.value) {
     // 使用 fetch keepalive 确保页面卸载时请求仍能发出
+    const token = getSessionToken()
+    const headers = { 'Content-Type': 'application/json' }
+    if (token) headers['X-Session-Token'] = token
     try {
       fetch(`/api/modules/${moduleId.value}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ text_content: textContent.value, revision: revision.value }),
         keepalive: true,
       })

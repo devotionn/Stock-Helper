@@ -142,6 +142,13 @@ CREATE TABLE IF NOT EXISTS backup_runs (
     created_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 
+-- 数据库版本记录表（用于增量迁移）
+CREATE TABLE IF NOT EXISTS schema_version (
+    version     INTEGER PRIMARY KEY,
+    description TEXT,
+    applied_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
 -- 索引
 CREATE INDEX IF NOT EXISTS idx_draft_assets_module ON draft_assets(module_id);
 CREATE INDEX IF NOT EXISTS idx_version_assets_version ON version_assets(module_version_id);
@@ -181,27 +188,41 @@ def get_db() -> Generator[sqlite3.Connection, None, None]:
         conn.close()
 
 
+MIGRATIONS = [
+    (1, "初始版本", []),
+    (2, "添加分析保存标记和复盘内容", [
+        "ALTER TABLE analyses ADD COLUMN saved_to_review INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE analyses ADD COLUMN saved_to_advice INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE analyses ADD COLUMN review_content TEXT DEFAULT ''",
+    ]),
+    (3, "添加图片排序字段", [
+        "ALTER TABLE analysis_assets ADD COLUMN image_order_index INTEGER NOT NULL DEFAULT 0",
+    ]),
+    (4, "添加草稿图片唯一约束", [
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_draft_assets_unique ON draft_assets(module_id, asset_id)",
+    ]),
+]
+
+
 def init_database():
     """初始化数据库：建表 + 迁移 + 插入12个模块草稿"""
     with get_db() as conn:
         conn.executescript(_SCHEMA)
-        # 迁移：为已有数据库添加新字段（如果不存在）
-        columns = {r[1] for r in conn.execute("PRAGMA table_info(analyses)").fetchall()}
-        if "saved_to_review" not in columns:
-            conn.execute("ALTER TABLE analyses ADD COLUMN saved_to_review INTEGER NOT NULL DEFAULT 0")
-        if "saved_to_advice" not in columns:
-            conn.execute("ALTER TABLE analyses ADD COLUMN saved_to_advice INTEGER NOT NULL DEFAULT 0")
-        if "review_content" not in columns:
-            conn.execute("ALTER TABLE analyses ADD COLUMN review_content TEXT DEFAULT ''")
-        # 迁移：analysis_assets 添加 image_order_index 列
-        aa_columns = {r[1] for r in conn.execute("PRAGMA table_info(analysis_assets)").fetchall()}
-        if "image_order_index" not in aa_columns:
-            conn.execute("ALTER TABLE analysis_assets ADD COLUMN image_order_index INTEGER NOT NULL DEFAULT 0")
-        # 迁移：为 draft_assets 创建唯一索引（防止重复添加同一图片到同一模块）
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_draft_assets_unique "
-            "ON draft_assets(module_id, asset_id)"
-        )
+        # 执行增量迁移（基于 schema_version 表）
+        current_version = conn.execute(
+            "SELECT MAX(version) FROM schema_version"
+        ).fetchone()[0] or 0
+        for version, desc, sqls in MIGRATIONS:
+            if version > current_version:
+                for sql in sqls:
+                    try:
+                        conn.execute(sql)
+                    except sqlite3.OperationalError:
+                        pass  # 字段已存在
+                conn.execute(
+                    "INSERT INTO schema_version (version, description) VALUES (?, ?)",
+                    (version, desc),
+                )
         # 初始化12个模块草稿行
         for m in MODULES:
             conn.execute(

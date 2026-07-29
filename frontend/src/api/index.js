@@ -5,6 +5,44 @@ const api = axios.create({
   timeout: 180000, // AI分析可能需要较长时间
 })
 
+// ---- 会话令牌管理 ----
+// 令牌存储在内存变量中（不使用 localStorage），应用启动后通过 /api/session 获取
+let sessionToken = null
+let tokenPromise = null
+
+async function fetchSessionToken() {
+  // 使用原生 axios 调用，避免触发请求拦截器导致递归
+  const res = await axios.get('/api/session')
+  sessionToken = res.data.token
+  return sessionToken
+}
+
+function ensureSessionToken() {
+  if (!sessionToken && !tokenPromise) {
+    tokenPromise = fetchSessionToken().catch((e) => {
+      tokenPromise = null // 失败后允许后续重试
+      throw e
+    })
+  }
+  return tokenPromise
+}
+
+// 请求拦截器：首次请求前自动获取令牌，并为所有请求附加 X-Session-Token 头
+api.interceptors.request.use(async (config) => {
+  if (!sessionToken) {
+    await ensureSessionToken()
+  }
+  if (sessionToken) {
+    config.headers['X-Session-Token'] = sessionToken
+  }
+  return config
+})
+
+// 供非 axios 请求（如页面卸载时的 keepalive fetch）同步获取令牌
+export function getSessionToken() {
+  return sessionToken
+}
+
 // ---- 模块 ----
 export const modulesApi = {
   getCards: () => api.get('/modules'),

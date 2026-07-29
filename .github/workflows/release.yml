@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 构建前端
+        run: |
+          cd frontend && npm ci && npm run build
+
+      - name: 安装后端依赖
+        run: |
+          cd backend
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: 打包 .app
+        run: |
+          chmod +x packaging/macos/build_app.sh
+          bash packaging/macos/build_app.sh
+
+      - name: 生成 appcast
+        run: |
+          cd dist
+          zip -r StockHelper-${{ github.ref_name }}.zip 股票分析助手.app
+          cd ..
+          python packaging/macos/generate_appcast.py "dist/StockHelper-${{ github.ref_name }}.zip" "${{ github.ref_name }}" "dist/appcast.xml"
+
+      - name: 创建 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/StockHelper-${{ github.ref_name }}.zip
+            dist/appcast.xml
+          body: |
+            ## 股票助手 ${{ github.ref_name }}
+
+            ### 更新内容
+            - 请在此处填写更新说明
+
+            ### 说明
+            - 不会删除您的文字、图片和历史记录
+            - 本分析仅供参考，不构成投资建议
+          draft: true
+          prerelease: true

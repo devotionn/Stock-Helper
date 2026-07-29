@@ -1,11 +1,12 @@
 """FastAPI 主应用"""
 import os
 import sys
+import secrets
 from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from contextlib import asynccontextmanager
 
 # 确保能导入 app 包
@@ -17,6 +18,13 @@ from app.routers import modules, analysis, history, combinations, sys_settings, 
 
 # 前端构建产物目录
 FRONTEND_DIST = settings.base_dir.parent / "frontend" / "dist"
+
+# 本地会话令牌：应用启动时生成，前端首次加载通过 /api/session 获取
+SESSION_TOKEN = secrets.token_urlsafe(32)
+# 允许的 Host（防 DNS rebinding），由本地监听地址和端口构成
+ALLOWED_HOSTS = {f"127.0.0.1:{settings.port}", f"localhost:{settings.port}"}
+# 开发环境允许的来源（这些来源不强制会话令牌，方便调试）
+DEV_ORIGINS = {"http://127.0.0.1:5173", "http://localhost:5173"}
 
 
 @asynccontextmanager
@@ -50,6 +58,27 @@ app.add_middleware(
 
 
 @app.middleware("http")
+async def security_check(request: Request, call_next):
+    """对 /api/ 路径进行 Host 校验（防 DNS rebinding）和会话令牌校验"""
+    path = request.url.path
+    if path.startswith("/api/"):
+        # Host 校验：拒绝非本地 Host，防止 DNS rebinding 攻击
+        host = request.headers.get("host", "")
+        if host not in ALLOWED_HOSTS:
+            return JSONResponse(status_code=403, content={"detail": "Forbidden host"})
+        # /api/session 是获取令牌的入口，无需校验令牌
+        if path == "/api/session":
+            return await call_next(request)
+        # 开发环境（来自 dev server 的请求）不强制令牌，方便调试
+        origin = request.headers.get("origin", "")
+        if origin not in DEV_ORIGINS:
+            token = request.headers.get("x-session-token", "")
+            if token != SESSION_TOKEN:
+                return JSONResponse(status_code=401, content={"detail": "Invalid session token"})
+    return await call_next(request)
+
+
+@app.middleware("http")
 async def add_security_headers(request: Request, call_next):
     """添加安全响应头：所有环境均生效"""
     response = await call_next(request)
@@ -68,6 +97,12 @@ app.include_router(analysis.router, prefix="/api/analysis", tags=["组合分析"
 app.include_router(history.router, prefix="/api/history", tags=["历史记录"])
 app.include_router(sys_settings.router, prefix="/api/settings", tags=["系统设置"])
 app.include_router(backup.router, prefix="/api/backup", tags=["备份恢复"])
+
+
+@app.get("/api/session")
+def get_session():
+    """返回本地会话令牌（无需令牌即可访问，供前端首次获取）"""
+    return {"token": SESSION_TOKEN}
 
 
 @app.get("/api/health")

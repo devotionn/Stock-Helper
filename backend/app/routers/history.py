@@ -95,7 +95,7 @@ def get_history_detail(analysis_id: int):
         for snap in snapshots:
             images = conn.execute(
                 "SELECT relative_path, thumbnail_path FROM analysis_assets "
-                "WHERE analysis_id=? AND module_id=? ORDER BY order_index",
+                "WHERE analysis_id=? AND module_id=? ORDER BY image_order_index",
                 (analysis_id, snap["module_id"])
             ).fetchall()
             snap_list.append({
