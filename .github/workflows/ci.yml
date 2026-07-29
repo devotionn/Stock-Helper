@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -50,9 +50,6 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 30
     needs: [backend-test, frontend-test]
-    env:
-      SMOKE_KEYCHAIN: ${{ runner.temp }}/stock-helper-smoke.keychain-db
-      SMOKE_KEYCHAIN_PASSWORD: stock-helper-ci-keychain
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -68,6 +65,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          SMOKE_KEYCHAIN="$RUNNER_TEMP/stock-helper-smoke.keychain-db"
+          SMOKE_KEYCHAIN_PASSWORD="stock-helper-ci-keychain"
           security delete-keychain "$SMOKE_KEYCHAIN" >/dev/null 2>&1 || true
           security create-keychain -p "$SMOKE_KEYCHAIN_PASSWORD" "$SMOKE_KEYCHAIN"
           security set-keychain-settings -lut 21600 "$SMOKE_KEYCHAIN"
@@ -106,4 +105,4 @@ jobs:
       - name: 清理测试 Keychain
         if: always()
         run: |
-          security delete-keychain "$SMOKE_KEYCHAIN" >/dev/null 2>&1 || true
+          security delete-keychain "$RUNNER_TEMP/stock-helper-smoke.keychain-db" >/dev/null 2>&1 || true
