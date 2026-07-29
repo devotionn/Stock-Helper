@@ -1,19 +1,22 @@
-"""AI 供应商适配层"""
-import json
+"""AI 供应商适配层。"""
+from __future__ import annotations
+
 import base64
+import json
 import mimetypes
-from pathlib import Path
+import re
 from io import BytesIO
-import httpx
-import asyncio
+from pathlib import Path
 from typing import Optional
+
+import httpx
 from PIL import Image
+
 from ..config import settings
 from ..database import get_db
 from .secret_store import get_secret_store
 
-# 固定系统提示词
-SYSTEM_PROMPT = """你是一个专业的股票分析助手。你将收到用户选择的多个模块的内容（文字和图片），按照模块排列顺序进行分析。
+SYSTEM_PROMPT = """你是一个专业的股票分析助手。你将收到同一个投研日期下、按用户指定顺序排列的多个模块内容（文字和图片）。
 
 请严格按照以下7个部分输出分析结果，使用JSON格式：
 {
@@ -27,213 +30,218 @@ SYSTEM_PROMPT = """你是一个专业的股票分析助手。你将收到用户�
 }
 
 重要规范：
-1. 不得虚构股票价格、政策、财务数据或图片中看不清的信息
-2. 当图片不清楚或信息不足时，必须明确提示无法确认
-3. 分析结果仅供参考，不构成投资建议
-4. 每个部分的内容用中文，详细但不冗余"""
+1. 必须区分投研日期、模块名称和股票名称，不得把不同日期的信息混为一谈
+2. 不得虚构股票价格、政策、财务数据或图片中看不清的信息
+3. 当图片不清楚或信息不足时，必须明确提示无法确认
+4. 分析结果仅供参考，不构成投资建议
+5. 每个部分的内容用中文，详细但不冗余"""
 
 
 def get_ai_config() -> dict:
-    """获取AI配置：API密钥从SecretStore读取，其余从数据库"""
+    """获取 AI 配置：API 密钥从 SecretStore 读取，其余从数据库读取。"""
     secret_store = get_secret_store()
     with get_db() as conn:
-        row = conn.execute(
+        rows = conn.execute(
             "SELECT key, value FROM settings WHERE key IN ('ai_api_url', 'ai_model')"
         ).fetchall()
-        cfg = {r["key"]: r["value"] for r in row}
+        config = {row["key"]: row["value"] for row in rows}
     return {
-        "api_url": cfg.get("ai_api_url", ""),
+        "api_url": config.get("ai_api_url", ""),
         "api_key": secret_store.get_secret("ai_api_key") or "",
-        "model": cfg.get("ai_model", ""),
+        "model": config.get("ai_model", ""),
     }
 
 
 def _image_to_data_uri(file_path: str) -> str:
-    """将本地图片文件转为 base64 data URI，供远程AI API读取"""
     path = Path(file_path)
     if not path.exists():
         return ""
-    mime, _ = mimetypes.guess_type(str(path))
-    if mime is None:
-        mime = "image/jpeg"
-    data = path.read_bytes()
-    b64 = base64.b64encode(data).decode("ascii")
-    return f"data:{mime};base64,{b64}"
+    mime_type, _ = mimetypes.guess_type(str(path))
+    mime_type = mime_type or "image/jpeg"
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
 
 
 def compress_image_for_ai(file_path: str) -> str:
-    """压缩图片供AI分析：最长边压缩到设定像素，转为JPEG质量85，返回base64 data URI。
-    如果图片已经较小（<500KB）则直接读取为base64不压缩。"""
+    """压缩图片供 AI 分析；原文件不变。"""
     path = Path(file_path)
     if not path.exists():
         return ""
-
-    # 如果图片已经较小（<500KB），直接读取为base64不压缩
-    file_size = path.stat().st_size
-    if file_size < 500 * 1024:
+    if path.stat().st_size < 500 * 1024:
         return _image_to_data_uri(file_path)
 
     try:
-        img = Image.open(str(path))
-        # 最长边压缩
+        with Image.open(str(path)) as source:
+            image = source.copy()
         max_edge = settings.ai_image_max_long_edge
-        w, h = img.size
-        if max(w, h) > max_edge:
-            if w >= h:
-                new_w = max_edge
-                new_h = int(h * max_edge / w)
+        width, height = image.size
+        if max(width, height) > max_edge:
+            if width >= height:
+                new_size = (max_edge, int(height * max_edge / width))
             else:
-                new_h = max_edge
-                new_w = int(w * max_edge / h)
-            img = img.resize((new_w, new_h), Image.LANCZOS)
-        # 转为RGB（JPEG不支持透明通道）
-        if img.mode in ("RGBA", "P", "LA"):
-            img = img.convert("RGB")
-        buf = BytesIO()
-        img.save(buf, format="JPEG", quality=settings.ai_image_quality)
-        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-        return f"data:image/jpeg;base64,{b64}"
+                new_size = (int(width * max_edge / height), max_edge)
+            image = image.resize(new_size, Image.Resampling.LANCZOS)
+        if image.mode not in ("RGB", "L"):
+            image = image.convert("RGB")
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG", quality=settings.ai_image_quality)
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        return f"data:image/jpeg;base64,{encoded}"
     except Exception:
-        # 压缩失败则回退到直接读取
         return _image_to_data_uri(file_path)
 
 
-def build_analysis_input(module_snapshots: list[dict], analysis_request: str, asset_paths: list[str]) -> list[dict]:
-    """构建AI输入消息内容"""
-    content = []
+def build_analysis_input(
+    module_snapshots: list[dict],
+    analysis_request: str,
+) -> list[dict]:
+    """构建包含投研日期、股票标题、文字和图片的多模态输入。"""
+    content: list[dict] = []
     image_count = 0
     max_images = settings.ai_max_images
 
-    for snap in module_snapshots:
-        # 文字始终添加（不受图片数量限制影响）
-        content.append({
-            "type": "text",
-            "text": f"【模块{snap['order_index']+1}：{snap['module_name']}】\n{snap['text_content'] or '（无文字内容）'}"
-        })
-        # 添加该模块的图片（压缩后转为 base64 data URI），限制总数量
-        for asset_path in snap.get("assets", []):
+    record_dates = {
+        snapshot.get("record_date")
+        for snapshot in module_snapshots
+        if snapshot.get("record_date")
+    }
+    if record_dates:
+        content.append(
+            {
+                "type": "text",
+                "text": "【本次投研日期】\n" + "、".join(sorted(record_dates)),
+            }
+        )
+
+    for snapshot in module_snapshots:
+        module_number = int(snapshot.get("order_index", 0)) + 1
+        module_name = snapshot.get("module_name") or f"模块{module_number}"
+        display_title = (snapshot.get("display_title") or "").strip()
+        header = f"【模块{module_number}：{module_name}】"
+        if display_title:
+            header += f"\n【股票名称/标的：{display_title}】"
+        text = snapshot.get("text_content") or "（无文字内容）"
+        content.append({"type": "text", "text": f"{header}\n{text}"})
+
+        for asset_path in snapshot.get("assets", []):
             if image_count >= max_images:
                 break
             data_uri = compress_image_for_ai(asset_path)
             if data_uri:
-                content.append({
-                    "type": "image_url",
-                    "image_url": {"url": data_uri}
-                })
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": data_uri},
+                    }
+                )
                 image_count += 1
 
-    # 分析要求始终添加
     if analysis_request:
-        content.append({
-            "type": "text",
-            "text": f"【本次分析要求】\n{analysis_request}"
-        })
-
+        content.append(
+            {
+                "type": "text",
+                "text": f"【本次分析要求】\n{analysis_request}",
+            }
+        )
     return content
 
 
 async def call_ai(module_snapshots: list[dict], analysis_request: str) -> dict:
-    """调用AI API进行分析，返回 {result_json, raw_result, error}"""
-    cfg = get_ai_config()
-    if not cfg["api_url"] or not cfg["api_key"] or not cfg["model"]:
+    """调用 AI API，返回结构化结果、原文或明确错误。"""
+    config = get_ai_config()
+    if not config["api_url"] or not config["api_key"] or not config["model"]:
         return {
             "result_json": None,
             "raw_result": None,
             "error": "AI接口未配置，请在系统设置中填写API地址、密钥和模型名称",
         }
 
-    # 收集所有图片路径
-    asset_paths = []
-    for snap in module_snapshots:
-        for asset in snap.get("assets", []):
-            asset_paths.append(asset)
-
-    content = build_analysis_input(module_snapshots, analysis_request, asset_paths)
-
     payload = {
-        "model": cfg["model"],
+        "model": config["model"],
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": content},
+            {
+                "role": "user",
+                "content": build_analysis_input(module_snapshots, analysis_request),
+            },
         ],
         "temperature": 0.3,
         "max_tokens": 4096,
     }
-
     headers = {
-        "Authorization": f"Bearer {cfg['api_key']}",
+        "Authorization": f"Bearer {config['api_key']}",
         "Content-Type": "application/json",
     }
 
     try:
         async with httpx.AsyncClient(timeout=settings.ai_timeout) as client:
-            response = await client.post(cfg["api_url"], json=payload, headers=headers)
+            response = await client.post(config["api_url"], json=payload, headers=headers)
             response.raise_for_status()
             data = response.json()
 
-        # 提取AI返回文本
-        raw_text = ""
         try:
             raw_text = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError):
-            return {"result_json": None, "raw_result": str(data),
-                    "error": "AI返回格式异常"}
+        except (KeyError, IndexError, TypeError):
+            return {
+                "result_json": None,
+                "raw_result": str(data),
+                "error": "AI返回格式异常",
+            }
 
-        # 尝试解析JSON
         result_json = parse_ai_result(raw_text)
-
         if result_json is None:
-            # JSON解析失败，返回警告但保留原文
             return {
                 "result_json": None,
                 "raw_result": raw_text,
                 "error": None,
                 "warning": "AI返回结果格式不完整",
             }
-
         return {
             "result_json": result_json,
             "raw_result": raw_text,
             "error": None,
         }
-
     except httpx.TimeoutException:
-        return {"result_json": None, "raw_result": None,
-                "error": f"AI请求超时（{settings.ai_timeout}秒）"}
-    except httpx.HTTPStatusError as e:
-        return {"result_json": None, "raw_result": None,
-                "error": f"AI接口返回错误: {e.response.status_code} - {e.response.text[:200]}"}
-    except Exception as e:
-        return {"result_json": None, "raw_result": None,
-                "error": f"AI调用失败: {str(e)}"}
+        return {
+            "result_json": None,
+            "raw_result": None,
+            "error": f"AI请求超时（{settings.ai_timeout}秒）",
+        }
+    except httpx.HTTPStatusError as exc:
+        return {
+            "result_json": None,
+            "raw_result": None,
+            "error": (
+                f"AI接口返回错误: {exc.response.status_code} - "
+                f"{exc.response.text[:200]}"
+            ),
+        }
+    except Exception as exc:
+        return {
+            "result_json": None,
+            "raw_result": None,
+            "error": f"AI调用失败: {exc}",
+        }
 
 
 def parse_ai_result(text: str) -> Optional[str]:
-    """尝试从AI返回文本中提取JSON结果"""
-    # 尝试直接解析
+    """从 AI 返回文本中提取 JSON。"""
     try:
-        result = json.loads(text)
-        return json.dumps(result, ensure_ascii=False)
+        return json.dumps(json.loads(text), ensure_ascii=False)
     except json.JSONDecodeError:
         pass
 
-    # 尝试提取 ```json ... ``` 块
-    import re
-    match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
-    if match:
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if fenced:
         try:
-            result = json.loads(match.group(1))
-            return json.dumps(result, ensure_ascii=False)
+            return json.dumps(json.loads(fenced.group(1)), ensure_ascii=False)
         except json.JSONDecodeError:
             pass
 
-    # 尝试提取第一个 { ... } 块
-    match = re.search(r'\{.*\}', text, re.DOTALL)
-    if match:
+    object_match = re.search(r"\{.*\}", text, re.DOTALL)
+    if object_match:
         try:
-            result = json.loads(match.group(0))
-            return json.dumps(result, ensure_ascii=False)
+            return json.dumps(json.loads(object_match.group(0)), ensure_ascii=False)
         except json.JSONDecodeError:
             pass
-
     return None
