@@ -1,5 +1,8 @@
 """AI 供应商适配层"""
 import json
+import base64
+import mimetypes
+from pathlib import Path
 import httpx
 import asyncio
 from typing import Optional
@@ -41,6 +44,19 @@ def get_ai_config() -> dict:
     }
 
 
+def _image_to_data_uri(file_path: str) -> str:
+    """将本地图片文件转为 base64 data URI，供远程AI API读取"""
+    path = Path(file_path)
+    if not path.exists():
+        return ""
+    mime, _ = mimetypes.guess_type(str(path))
+    if mime is None:
+        mime = "image/jpeg"
+    data = path.read_bytes()
+    b64 = base64.b64encode(data).decode("ascii")
+    return f"data:{mime};base64,{b64}"
+
+
 def build_analysis_input(module_snapshots: list[dict], analysis_request: str, asset_paths: list[str]) -> list[dict]:
     """构建AI输入消息内容"""
     content = []
@@ -50,12 +66,14 @@ def build_analysis_input(module_snapshots: list[dict], analysis_request: str, as
             "type": "text",
             "text": f"【模块{snap['order_index']+1}：{snap['module_name']}】\n{snap['text_content'] or '（无文字内容）'}"
         })
-        # 添加该模块的图片
-        for asset in snap.get("assets", []):
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": f"file://{asset}"}
-            })
+        # 添加该模块的图片（转为 base64 data URI）
+        for asset_path in snap.get("assets", []):
+            data_uri = _image_to_data_uri(asset_path)
+            if data_uri:
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": data_uri}
+                })
 
     if analysis_request:
         content.append({

@@ -387,7 +387,7 @@ onMounted(() => {
 }
 
 .module-card-images {
-  font-size: 14px;
+  font-size: 16px;
   color: var(--text-secondary);
 }
 
@@ -399,7 +399,7 @@ onMounted(() => {
   color: #fff;
   padding: 4px 12px;
   border-radius: 20px;
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 600;
 }
 
@@ -412,7 +412,7 @@ onMounted(() => {
 }
 
 .combination-modules {
-  font-size: 15px;
+  font-size: 16px;
   color: var(--text-secondary);
   word-break: break-all;
 }

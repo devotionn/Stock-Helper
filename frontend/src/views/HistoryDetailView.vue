@@ -388,7 +388,7 @@ onMounted(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 700;
 }
 
@@ -513,7 +513,7 @@ onMounted(() => {
 }
 
 .note-time {
-  font-size: 14px;
+  font-size: 16px;
   color: var(--text-secondary);
 }
 

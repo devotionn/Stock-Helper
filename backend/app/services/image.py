@@ -69,16 +69,20 @@ async def save_uploaded_image(upload_file: UploadFile) -> dict:
     abs_path = settings.assets_dir / rel_path
     abs_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # 如果已存在相同文件，直接复用
+    # 如果已存在相同文件，直接复用；否则先写临时文件再原子rename
     if not abs_path.exists():
-        abs_path.write_bytes(data)
+        tmp_path = abs_path.with_suffix(abs_path.suffix + ".tmp")
+        tmp_path.write_bytes(data)
+        tmp_path.replace(abs_path)  # 原子rename
 
     # 生成缩略图
     thumb_data = _make_thumbnail(img)
     thumb_rel = f"{prefix}/{sha256}_thumb.jpg"
     thumb_abs = settings.assets_dir / thumb_rel
     if not thumb_abs.exists():
-        thumb_abs.write_bytes(thumb_data)
+        thumb_tmp = thumb_abs.with_suffix(".tmp")
+        thumb_tmp.write_bytes(thumb_data)
+        thumb_tmp.replace(thumb_abs)
 
     return {
         "sha256": sha256,

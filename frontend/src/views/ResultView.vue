@@ -311,7 +311,7 @@ onUnmounted(stopPolling)
   align-items: center;
   justify-content: center;
   font-weight: 700;
-  font-size: 15px;
+  font-size: 16px;
 }
 
 .combo-name {
