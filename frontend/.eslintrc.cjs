@@ -15,6 +15,7 @@ module.exports = {
     'plugin:vue/vue3-recommended',
   ],
   rules: {
+    'no-empty': ['warn', { allowEmptyCatch: true }],
     'no-unused-vars': 'warn',
     'no-console': 'off',
     'vue/multi-word-component-names': 'off',
