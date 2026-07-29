@@ -326,8 +326,9 @@ def _migration_5(conn: sqlite3.Connection) -> None:
             "INSERT OR IGNORE INTO entry_assets "
             "(module_entry_id, asset_id, order_index, caption) "
             "SELECT e.id, da.asset_id, da.order_index, COALESCE(da.caption, '') "
-            "FROM draft_assets da JOIN module_entries e "
-            "ON e.record_date=? AND e.module_id=da.module_id",
+            "FROM draft_assets da "
+            "JOIN assets a ON a.id=da.asset_id "
+            "JOIN module_entries e ON e.record_date=? AND e.module_id=da.module_id",
             (workspace_date,),
         )
 
