@@ -121,20 +121,23 @@ print(digest.removeprefix("sha256:"))
 PY
 )"
   SPARKLE_URL="$(printf '%s\n' "$ASSET_INFO" | sed -n '1p')"
-  OFFICIAL_SHA256="$(printf '%s\n' "$ASSET_INFO" | sed -n '2p')"
-  [[ "$OFFICIAL_SHA256" =~ ^[0-9a-fA-F]{64}$ ]] || { echo "错误: 官方 SHA-256 格式异常"; exit 1; }
-  if [[ -n "$SPARKLE_ARCHIVE_SHA256" && "${SPARKLE_ARCHIVE_SHA256,,}" != "${OFFICIAL_SHA256,,}" ]]; then
-    echo "错误: 人工固定的 Sparkle SHA-256 与 GitHub 官方 Release digest 不一致"
-    exit 1
+  OFFICIAL_SHA256="$(printf '%s\n' "$ASSET_INFO" | sed -n '2p' | tr '[:upper:]' '[:lower:]')"
+  [[ "$OFFICIAL_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "错误: 官方 SHA-256 格式异常"; exit 1; }
+  if [[ -n "$SPARKLE_ARCHIVE_SHA256" ]]; then
+    PINNED_SHA256="$(printf '%s' "$SPARKLE_ARCHIVE_SHA256" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$PINNED_SHA256" != "$OFFICIAL_SHA256" ]]; then
+      echo "错误: 人工固定的 Sparkle SHA-256 与 GitHub 官方 Release digest 不一致"
+      exit 1
+    fi
   fi
 
   SPARKLE_ARCHIVE="$SPARKLE_TEMP/$SPARKLE_ASSET_NAME"
   curl --fail --location --retry 3 --retry-delay 2 "$SPARKLE_URL" -o "$SPARKLE_ARCHIVE"
-  ACTUAL_SHA256="$(shasum -a 256 "$SPARKLE_ARCHIVE" | awk '{print $1}')"
-  [[ "${ACTUAL_SHA256,,}" == "${OFFICIAL_SHA256,,}" ]] || {
+  ACTUAL_SHA256="$(shasum -a 256 "$SPARKLE_ARCHIVE" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')"
+  if [[ "$ACTUAL_SHA256" != "$OFFICIAL_SHA256" ]]; then
     echo "错误: Sparkle 下载包 SHA-256 校验失败"
     exit 1
-  }
+  fi
   echo "Sparkle ${SPARKLE_VERSION} 官方资产校验通过: $ACTUAL_SHA256"
 
   tar -xf "$SPARKLE_ARCHIVE" -C "$SPARKLE_TEMP"
