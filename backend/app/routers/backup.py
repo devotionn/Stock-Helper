@@ -4,12 +4,15 @@ import sqlite3
 import shutil
 import zipfile
 import json
+import threading
 from datetime import datetime
 from pathlib import Path
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from ..database import get_db, get_connection, init_database
 from ..config import settings
 from ..schemas import BackupResult
+
+_restore_lock = threading.Lock()
 
 router = APIRouter()
 
@@ -63,10 +66,15 @@ def create_backup():
                         file_count += 1
                         total_size += abs_path.stat().st_size
 
+            # 读取当前迁移版本
+            with get_db() as conn:
+                row = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+                db_schema_version = row[0] if row[0] else 0
+
             # 3. manifest
             manifest = {
                 "app_version": "1.0.0",
-                "schema_version": 1,
+                "schema_version": db_schema_version,
                 "created_at": datetime.now().isoformat(),
                 "file_count": file_count,
                 "total_size": total_size,
@@ -74,7 +82,7 @@ def create_backup():
             zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
 
         # 原子rename
-        temp_path.rename(backup_path)
+        os.replace(str(temp_path), str(backup_path))
 
         # 记录备份
         with get_db() as conn:
@@ -117,13 +125,9 @@ def list_backups():
 @router.post("/restore")
 async def restore_backup(file: UploadFile = File(...)):
     """从备份文件恢复"""
-    if not file.filename.endswith(".shbackup"):
-        raise HTTPException(status_code=400, detail="请上传 .shbackup 备份文件")
-
-    data = await file.read()
+    if not _restore_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="正在执行恢复操作，请等待")
     temp_zip = settings.temp_dir / "restore.zip"
-    temp_zip.write_bytes(data)
-
     extract_dir = settings.temp_dir / "restore_extract"
     assets_rollback_dir = settings.temp_dir / "assets_rollback"
     db_rollback_path = settings.temp_dir / "db_rollback.db"
@@ -133,6 +137,14 @@ async def restore_backup(file: UploadFile = File(...)):
     MAX_SINGLE_FILE_SIZE = 100 * 1024 * 1024  # 单文件100MB
 
     try:
+        if not file.filename.endswith(".shbackup"):
+            raise HTTPException(status_code=400, detail="请上传 .shbackup 备份文件")
+
+        content = await file.read()
+        if len(content) > 2 * 1024 * 1024 * 1024:  # 2GB
+            raise HTTPException(status_code=400, detail="备份文件过大")
+        temp_zip.write_bytes(content)
+
         # ===== 阶段1：解压前校验（读取ZIP信息，不实际解压）=====
         with zipfile.ZipFile(temp_zip, "r") as zf:
             names = zf.namelist()
@@ -266,6 +278,7 @@ async def restore_backup(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"恢复失败: {str(e)}")
     finally:
+        _restore_lock.release()
         if temp_zip.exists():
             temp_zip.unlink()
         if extract_dir.exists():

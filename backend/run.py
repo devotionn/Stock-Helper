@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import uvicorn
 from app.config import settings
+from app.main import app
 
 
 def open_browser():
@@ -18,10 +19,4 @@ def open_browser():
 
 if __name__ == "__main__":
     threading.Thread(target=open_browser, daemon=True).start()
-    uvicorn.run(
-        "app.main:app",
-        host=settings.host,
-        port=settings.port,
-        reload=False,
-        log_level="info",
-    )
+    uvicorn.run(app, host=settings.host, port=settings.port)

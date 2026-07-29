@@ -77,6 +77,9 @@ class _KeyringSecretStore(SecretStore):
             import keyring
             self._keyring = keyring
         except ImportError:
+            if getattr(sys, 'frozen', False):
+                raise RuntimeError("Keyring 不可用，无法安全存储密钥")
+            print("警告：keyring 不可用，回退到开发环境密钥存储（不安全）")
             self._keyring = None
 
     def get_secret(self, key: str) -> str:

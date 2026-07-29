@@ -12,11 +12,12 @@ def test_create_backup(client):
 
 def test_list_backups(client):
     """测试列出备份"""
-    client.post('/api/backup')
+    r = client.post('/api/backup')
+    assert r.status_code == 200, f"备份创建失败: {r.text}"
     r = client.get('/api/backup')
     assert r.status_code == 200
     data = r.json()
-    assert len(data) >= 1
+    assert len(data) >= 1, f"备份列表为空，响应: {data}"
 
 def test_restore_with_bad_zip(client):
     """测试恢复无效文件"""

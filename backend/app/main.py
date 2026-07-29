@@ -16,8 +16,18 @@ from app.database import init_database
 from app.config import settings
 from app.routers import modules, analysis, history, combinations, sys_settings, backup
 
+def get_frontend_dist() -> Path:
+    """获取前端构建产物路径，支持 PyInstaller 打包环境"""
+    if getattr(sys, 'frozen', False):
+        # PyInstaller 打包后，资源在 _MEIPASS 中
+        return Path(sys._MEIPASS) / "frontend" / "dist"
+    else:
+        # 开发环境
+        return settings.base_dir.parent / "frontend" / "dist"
+
+
 # 前端构建产物目录
-FRONTEND_DIST = settings.base_dir.parent / "frontend" / "dist"
+FRONTEND_DIST = get_frontend_dist()
 
 # 本地会话令牌：应用启动时生成，前端首次加载通过 /api/session 获取
 SESSION_TOKEN = secrets.token_urlsafe(32)

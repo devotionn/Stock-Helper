@@ -8,6 +8,8 @@ from datetime import datetime
 
 def generate_appcast(app_path: str, version: str, output_path: str = "appcast.xml"):
     """生成 Sparkle appcast.xml"""
+    # 确保版本号不含 v 前缀，避免 URL 中出现 vv
+    version = version.lstrip('v')
     app = Path(app_path)
     if not app.exists():
         print(f"错误: 文件不存在 {app}")
@@ -27,10 +29,11 @@ def generate_appcast(app_path: str, version: str, output_path: str = "appcast.xm
       <pubDate>{pub_date}</pubDate>
       <sparkle:version>{version}</sparkle:version>
       <sparkle:shortVersionString>{version}</sparkle:shortVersionString>
-      <sparkle:dsaSignature>待签名</sparkle:dsaSignature>
+      <sparkle:dsaSignature></sparkle:dsaSignature>
+      <!-- 需要使用 Sparkle 的 sign_update 工具生成 EdDSA 签名后填入 sparkle:edSignature -->
       <enclosure
         url="https://github.com/devotionn/Stock-Helper/releases/download/v{version}/StockHelper-{version}.zip"
-        sparkle:edSignature="{sha256}"
+        sparkle:edSignature=""
         length="{size}"
         type="application/octet-stream"
       />
@@ -49,6 +52,8 @@ def generate_appcast(app_path: str, version: str, output_path: str = "appcast.xm
     print(f"版本: {version}")
     print(f"大小: {size} bytes")
     print(f"SHA-256: {sha256}")
+    print("请使用 Sparkle 的 sign_update 工具生成 EdDSA 签名:")
+    print(f"  ./bin/sign_update {app_path} <private_key>")
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:

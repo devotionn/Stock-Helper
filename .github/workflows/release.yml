@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   release:
     runs-on: macos-14
@@ -23,6 +26,16 @@ jobs:
         run: |
           cd frontend && npm ci && npm run build
 
+      - name: 安装后端测试依赖
+        run: |
+          cd backend
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: 运行后端测试
+        run: |
+          cd backend
+          python -m pytest tests/ -v
+
       - name: 安装后端依赖
         run: |
           cd backend
@@ -30,9 +43,11 @@ jobs:
           pip install pyinstaller
 
       - name: 打包 .app
+        env:
+          APP_VERSION: ${{ github.ref_name }}
         run: |
           chmod +x packaging/macos/build_app.sh
-          bash packaging/macos/build_app.sh
+          VERSION=$APP_VERSION bash packaging/macos/build_app.sh
 
       - name: 生成 appcast
         run: |

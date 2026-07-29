@@ -1,81 +1,23 @@
-有问题。**它这段总结不是完全错，但说得偏乐观了。**
+我重新检查了最新提交 **`4bd310dc`——“完成审查报告全部Windows端可完成项”**。这次修改是实质性的，进步很明显。
 
-它把“需要在 macOS 上最终验证”写成了“只能等 macOS 环境才能实现”。实际上，当前还有一些工作完全可以、也应该先在 Windows 上写完。
+## 现在的总体判断
 
-# 先说结论
+**Windows阶段大约完成了80%—85%，已经可以开始准备第一次 macOS arm64 构建。**
 
-目前大致可以判断为：
+但还不能说“Windows上所有工作都做到位了”。目前仍有 **3个P0级问题**，不修的话，GitHub Actions即使生成 `.app`，也可能出现：
 
-- **业务功能原型：约85%**
-- **Windows端工程完善度：约70%**
-- **macOS正式交付能力：约10%—20%**
-- **还不能认定Windows阶段已经全部做到位**
-
-最新一轮代码确实进步很大，异步AI分析、图片压缩、密钥脱敏、备份校验、历史快照等都补了一轮。但仓库里仍有几处明确问题。
+- 应用打不开；
+- 打开后只有后端、没有页面；
+- AI密钥仍然落在SQLite；
+- 自动更新完全不能用。
 
 ---
 
-# 已经做好的部分
+# 这次真正修好的部分
 
-这次修改不是只写了总结，代码里确实有实质改动。
+### 1. 跨平台数据目录已经基本正确
 
-## 1. AI分析改为异步任务
-
-现在提交分析后先返回 `202` 和分析ID，再由后台任务调用AI，方向正确。
-
-## 2. 图片增加压缩和数量限制
-
-大图片会压到最长边2048像素，并转成JPEG；单次最多读取16张图片，可以减少请求体积。
-
-## 3. API密钥不再直接完整返回页面
-
-设置接口现在返回是否已配置及脱敏值，例如：
-
-```text
-sk****1234
-```
-
-## 4. CORS比之前安全
-
-已经从通配符改成只允许本地Vue开发地址，并增加了一些安全响应头。
-
-## 5. 备份恢复增加了基础校验
-
-现在会检查压缩包路径、文件数量、总大小和SQLite完整性。
-
-所以，这一轮修改总体是有效的，不是白写。
-
----
-
-# 但Windows端仍有这些没做到位
-
-## 1. macOS数据目录分离现在就可以写，不需要等Mac
-
-当前代码依然默认把数据放在：
-
-```text
-backend/data/
-```
-
-数据库、图片、临时文件和备份目录都依赖源码目录。
-
-所以截图里说：
-
-> 数据目录可以通过config.py配置，代码层面已经做好准备
-
-只能算“可以手工覆盖配置”，不能算真正完成。
-
-而且当前这些路径分别在类定义时计算：
-
-```python
-data_dir = base_dir / "data"
-db_path = data_dir / "stock_helper.db"
-assets_dir = data_dir / "assets"
-```
-
-即使只覆盖 `data_dir`，其他派生路径也不一定会自动跟随新的 `data_dir`。
-
-这部分完全可以在Windows现在完成：
+现在会根据系统自动选择：
 
 ```text
 Windows：
@@ -85,219 +27,394 @@ macOS：
 ~/Library/Application Support/Stock Helper/
 ```
 
-建议使用统一的路径服务或 `platformdirs`，而不是等拿到Mac再改。
+并且覆盖 `data_dir` 后，数据库、图片、临时文件和备份目录会重新派生，不再继续写到源码目录。
+
+这项可以认定为 **基本完成**。
+
+### 2. 本地接口安全明显加强
+
+目前已经加入：
+
+- 随机会话令牌；
+
+- `Host`白名单；
+
+- 防DNS Rebinding；
+
+- 非开发环境API请求必须带令牌；
+
+- 前端首次启动自动获取令牌；
+
+- 令牌只放在内存，不写入 `localStorage`。
+
+这套安全逻辑对于本地单机系统已经比较合适。
+
+### 3. AI图片限制逻辑修正
+
+现在即使图片达到16张上限，后续模块的文字仍然会继续加入AI请求，不会再把后续模块整体跳过。
+
+### 4. 历史图片顺序修正
+
+历史详情现在按照 `image_order_index` 读取图片，之前“同一模块内图片顺序不稳定”的问题已经修复。
+
+### 5. 备份恢复增加完整回滚
+
+当前恢复流程已经包括：
+
+- 解压前统计总大小；
+
+- 文件数量和单文件大小限制；
+
+- 路径安全检查；
+
+- SQLite完整性检查；
+
+- 恢复前自动备份；
+
+- 数据库和图片回滚副本；
+
+- 恢复失败后自动还原。
+
+比上一版可靠很多。
 
 ---
 
-## 2. “密钥脱敏”不等于“密钥安全存储”
+# 仍然必须修复的P0问题
 
-目前页面确实不再显示完整密钥，但密钥仍然以普通文本存在SQLite的 `settings` 表中。
+## P0-1：Keychain实际上还没有启用
 
-AI调用时也是直接从数据库读取完整密钥。
-
-所以目前只是：
+代码虽然写了：
 
 ```text
-页面不显示完整密钥
+MacKeychainStore
+WindowsCredentialStore
 ```
 
-还不是：
+但它依赖Python的 `keyring` 包；如果没有安装，就会自动退回 `DevelopmentSecretStore`，继续把密钥写入SQLite数据库。
+
+而正式依赖文件中目前没有：
 
 ```text
-密钥已经从数据库移出
+keyring
 ```
 
-现在就可以先写一个统一接口：
+只有FastAPI、Pillow、httpx等依赖。
+
+所以现状是：
 
 ```text
-SecretStore
-├── WindowsCredentialStore
-├── MacKeychainStore
-└── DevelopmentSecretStore
+代码结构上支持Keychain
+≠
+打包后的Mac程序真的使用Keychain
 ```
 
-Windows先实现开发用存储或Windows凭据管理器；到了Mac只替换成Keychain实现。
+### 必须修改
+
+在生产依赖中加入锁定版本的 `keyring`，并在PyInstaller中确认打包对应后端：
+
+- macOS Keychain backend；
+- Windows Credential Locker backend；
+- 打包启动时执行一次密钥读写自检；
+- 如果Keychain不可用，正式版本不能静默退回SQLite，应明确报错。
+
+否则李叔输入的AI密钥仍可能明文保存在数据库里。
 
 ---
 
-## 3. AI图片数量限制存在逻辑错误
+## P0-2：当前macOS打包产物很可能启动失败或没有前端页面
 
-当前代码达到16张图片后，不只是停止添加图片，还直接跳出了后续模块循环。
+这里有两个风险。
+
+### 风险一：PyInstaller可能漏掉 `app.main`
+
+启动代码使用的是动态字符串：
+
+```python
+uvicorn.run("app.main:app")
+```
+
+但PyInstaller配置中的 `hiddenimports` 没有：
+
+```text
+app.main
+app.routers.modules
+app.routers.analysis
+……
+```
+
+PyInstaller无法保证识别字符串形式的动态导入。构建出的程序可能报：
+
+```text
+Could not import module "app.main"
+```
+
+最稳妥的改法是直接导入：
+
+```python
+from app.main import app
+
+uvicorn.run(
+    app,
+    host=settings.host,
+    port=settings.port,
+)
+```
+
+### 风险二：前端资源路径可能错一层
+
+PyInstaller把前端文件打包到：
+
+```text
+frontend/dist
+```
+
+但是主程序查找前端时使用：
+
+```python
+FRONTEND_DIST = settings.base_dir.parent / "frontend" / "dist"
+```
+
+在源码环境能正常工作，但打包后资源通常应从PyInstaller运行目录读取。当前没有显式使用：
+
+```python
+sys._MEIPASS
+```
+
+因此很可能出现：
+
+```text
+后端启动成功
+但浏览器打开后显示“前端文件未找到”
+```
+
+需要增加统一的资源路径函数：
+
+```python
+def resource_path(relative: str) -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS) / relative
+    return PROJECT_ROOT / relative
+```
+
+这两项仍然可以在Windows写完，再交给GitHub Actions的Mac环境验证。
+
+---
+
+## P0-3：Sparkle自动更新目前只是“占位代码”，还不能真正工作
+
+现在的 `.app` 创建了一个空的：
+
+```text
+Contents/Frameworks/
+```
+
+但构建脚本没有复制Sparkle Framework，也没有Swift/AppKit启动器或 `SPUStandardUpdaterController`。
+
+也就是说，目前客户端根本没有：
+
+- 检查更新；
+- 显示新版本；
+- 下载更新；
+- 替换旧应用；
+- 重启；
+- 失败回退。
+
+### 当前appcast也有明确错误
+
+Release工作流把版本参数传成：
+
+```text
+github.ref_name
+```
 
 例如：
 
 ```text
-模块0有16张图
-模块1有文字
-模块7有文字
-模块8有文字
+v1.0.1
 ```
 
-AI可能只收到模块0，后面模块1、7、8的文字也不会继续加入。
-
-正确逻辑应该是：
-
-```text
-所有模块文字始终发送
-只有图片数量受到16张限制
-```
-
-这是纯业务逻辑错误，在Windows上就能修。
-
----
-
-## 4. 历史图片顺序只修了一半
-
-保存时已经新增了：
-
-```text
-image_order_index
-```
-
-这一点正确。
-
-但是读取历史详情时，仍然按照：
-
-```sql
-ORDER BY order_index
-```
-
-而不是：
-
-```sql
-ORDER BY image_order_index
-```
-
-所以历史图片顺序仍然可能不正确。
-
----
-
-## 5. 备份恢复还没有真正做到可靠回退
-
-恢复时会先覆盖正式数据库，之后再执行初始化和迁移。
-
-如果后续失败，现在的回滚逻辑只恢复图片目录：
+生成器又在下载地址前增加一个 `v`：
 
 ```python
-恢复 assets
+releases/download/v{version}/
 ```
 
-但没有自动恢复刚刚被覆盖的原数据库。
-
-虽然它提前创建了恢复前备份，但失败时并没有自动从该备份恢复数据库。
-
-另外，压缩包总大小限制是在文件已经解压以后才统计。
-
-真正稳妥的方式应该是先读取ZIP目录信息，在解压前计算：
-
-- 未压缩总大小；
-- 文件数量；
-- 单文件大小；
-- 压缩比；
-- 路径合法性。
-
-然后再解压。
-
----
-
-## 6. 本地接口安全还没有完全闭环
-
-目前只是限制了CORS和增加安全响应头。
-
-还没有看到：
-
-- 随机本地会话令牌；
-- `Host`校验；
-- 写操作令牌校验；
-- 防DNS Rebinding；
-- 原生启动器向浏览器传递安全会话。
-
-对于只监听 `127.0.0.1` 的单机软件，风险确实比公网低，但正式交付仍建议补上一个轻量本地令牌。
-
----
-
-## 7. 还没有自动测试体系
-
-前端脚本目前只有：
+最终地址会变成：
 
 ```text
-dev
-build
-preview
+releases/download/vv1.0.1/
 ```
 
-没有Vitest、Playwright、ESLint或类型检查。
+下载地址是错的。
 
-后端依赖里也没有pytest等测试工具。
+另外，当前代码把SHA-256哈希直接写进：
 
-因此现在无法自动证明：
+```xml
+sparkle:edSignature
+```
 
-- 保存不会丢数据；
-- 备份能完整恢复；
-- 数据库迁移不会失败；
-- 模块组合顺序正确；
-- AI请求确实包含所有模块；
-- 旧版本能够升级到新版本。
+但Sparkle要求这里是真正使用EdDSA私钥生成的签名，不是普通SHA-256值。官方推荐使用Sparkle自带的 `generate_appcast` 或 `sign_update` 生成签名。([sparkle-project.org][1])
 
-对于要自动更新给李叔使用的程序，测试体系很重要。
+### 应用版本也被写死
 
----
+无论发布标签是多少，`Info.plist`始终写：
 
-# 截图里哪些项目不必等待实体Mac
+```text
+CFBundleVersion = 1.0.0
+CFBundleShortVersionString = 1.0.0
+```
 
-## Windows现在就可以完成
-
-- 跨平台数据目录抽象；
-- Windows和macOS路径规则；
-- SecretStore密钥接口；
-- 本地接口会话令牌；
-- 数据库迁移框架；
-- 备份恢复完整回滚；
-- PyInstaller `.spec` 文件；
-- macOS打包脚本；
-- GitHub Actions macOS arm64工作流；
-- GitHub Releases发布工作流；
-- 更新清单、版本检查、SHA-256校验；
-- Sparkle更新源和 `appcast.xml` 生成逻辑；
-- 前后端自动测试。
-
-尤其是：
-
-> **GitHub Actions macOS arm64构建不需要你拥有Mac。**
-
-你在Windows写好工作流，提交到GitHub后，GitHub提供的macOS Runner就可以执行构建。
-
-## 确实需要macOS环境验证
-
-这些才是真正需要你的M系列测试Mac或GitHub macOS Runner的：
-
-- `.app`能否正常启动；
-- Apple Silicon arm64产物能否运行；
-- Keychain实际读写；
-- Sparkle能否替换旧版应用；
-- Finder文件选择；
-- `Command+V`粘贴截图；
-- `Application Support`目录权限；
-- Gatekeeper行为；
-- Developer ID签名；
-- Apple公证；
-- 应用退出后进程是否残留；
-- 更新失败是否真的能够回退。
+Sparkle依赖递增的应用版本判断是否存在新版，因此这里必须由Git标签动态生成。([sparkle-project.org][2])
 
 ---
 
-# 最终判断
+# 仍需补齐的P1问题
 
-这次修改之后，**Windows上的业务代码比上一版完整很多，已经接近可用原型**。
+## 1. CI中的macOS构建任务实际上不会触发
 
-但截图中这句话：
+`ci.yml`只在以下情况触发：
 
-> “暂未实现的内容都需要macOS环境”
+```yaml
+push:
+  branches: [main]
+```
 
-不准确。
+但 `macos-build` 又要求：
 
-更准确的状态应该写成：
+```yaml
+if: startsWith(github.ref, 'refs/tags/v')
+```
 
-> 核心业务功能已基本实现；跨平台数据目录、密钥存储抽象、本地接口安全、备份完整回退、自动测试、GitHub Actions macOS构建及更新发布流程仍需继续开发。其中代码和CI部分可在Windows完成，最终安装、签名、公证、Keychain及自动更新需要在真实M系列Mac上验证。
+主分支提交不是Tag，Tag推送又不会触发这个CI工作流，因此这个任务实际上是“死任务”。
 
-所以现在还不应该直接进入“等Mac测试”阶段。应先把上面这些**不依赖Mac的工程问题继续修完**，再让GitHub Actions生成第一个arm64测试包，最后拿M系列Mac做真实验证。
+应改成以下任意一种：
+
+```yaml
+push:
+  branches: [main]
+  tags:
+    - "v*"
+```
+
+或者让主分支每次都构建一个未签名的Mac测试产物。
+
+## 2. Release没有先运行测试
+
+`release.yml`接到标签后直接构建和发布，没有先执行：
+
+- 后端测试；
+- Ruff；
+- 前端构建校验之外的检查；
+- 打包后启动测试。
+
+正式流程应为：
+
+```text
+测试通过
+→ 打包
+→ 启动健康检查
+→ 签名
+→ 公证
+→ 生成Sparkle签名
+→ 创建Release
+```
+
+并增加：
+
+```yaml
+permissions:
+  contents: write
+```
+
+## 3. “ESLint已配置”目前名不副实
+
+虽然新增了 `.eslintrc.cjs`，但 `package.json`：
+
+- 没有安装 `eslint`；
+
+- 没有Vue解析插件；
+
+- 没有 `lint` 脚本；
+
+- CI也没有执行前端lint。
+
+所以目前只是放了一个配置文件，实际不能完成Vue代码检查。
+
+## 4. 测试环境隔离顺序有错误
+
+测试代码先导入：
+
+```python
+from app.main import app
+```
+
+之后才设置：
+
+```python
+STOCK_DATA_DIR
+```
+
+但 `app.main` 导入时已经初始化了全局 `settings`，因此后面设置环境变量已经太晚。测试很可能仍然使用默认数据目录，而不是 `tests/test_data`。
+
+应在任何 `app` 模块导入前设置环境变量，或者使用 `monkeypatch` 后重新加载配置模块。
+
+现有11个测试也主要是基础CRUD，只覆盖：
+
+- 模块查询和保存；
+
+- 常用组合；
+
+- 创建备份；
+
+- 无效备份拒绝。
+
+还没有覆盖：
+
+- AI异步任务；
+- 图片压缩和16张限制；
+- 会话令牌；
+- Host校验；
+- 数据库迁移；
+- 成功备份后完整恢复；
+- 恢复失败数据库回滚；
+- PyInstaller程序启动；
+- 前端页面流程；
+- 自动更新。
+
+---
+
+# 备份还剩两个完善点
+
+现在备份比以前可靠很多，但还应修：
+
+1. 上传备份时使用 `await file.read()` 一次把整个文件读入内存，尚未限制压缩包本身大小。
+2. 临时文件固定使用 `restore.zip`、`restore_extract`、`db_rollback.db`，没有恢复锁；连续点击或并发请求可能互相覆盖。
+3. `manifest.json` 中 `schema_version` 仍固定写成 `1`，而数据库迁移当前已经到版本4。
+
+应从数据库读取真实版本写入manifest，并检查备份版本是否高于当前程序支持版本。
+
+---
+
+# 最终结论
+
+这次可以改口为：
+
+> **Windows端的核心业务和大部分工程底座已经完成，可以进入macOS构建准备阶段；但Keychain依赖、PyInstaller资源/导入、CI触发和Sparkle更新链路仍未达到可用状态。**
+
+现在不是推倒重写，而是再完成最后一轮工程修正：
+
+```text
+修复Keyring依赖
+→ 修复PyInstaller动态导入和资源路径
+→ 修复测试隔离
+→ 修复CI触发
+→ 用真实Sparkle工具生成签名
+→ 让版本号随Tag变化
+→ GitHub Actions生成第一个arm64 .app
+→ 在你的M芯片Mac上安装测试
+```
+
+完成前三项后，就可以合理地说：**Windows上能做的主体工作基本做到位了。**
+
+[1]: https://sparkle-project.org/documentation/publishing/?utm_source=chatgpt.com "Publishing an update - Sparkle: open source software update framework for macOS"
+[2]: https://sparkle-project.org/documentation/?utm_source=chatgpt.com "Documentation - Sparkle: open source software update framework for macOS"

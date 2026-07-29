@@ -7,7 +7,10 @@ from pydantic_settings import BaseSettings
 
 
 def _get_data_dir() -> Path:
-    """根据操作系统选择数据目录。可通过 STOCK_DATA_DIR 环境变量覆盖（开发时用）。"""
+    """根据操作系统选择数据目录。可通过 STOCK_DATA_DIR 环境变量覆盖。"""
+    env = os.environ.get("STOCK_DATA_DIR")
+    if env:
+        return Path(env)
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Application Support" / "Stock Helper"
     elif sys.platform == "win32":
