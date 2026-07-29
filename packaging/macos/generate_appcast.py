@@ -1,62 +1,66 @@
 #!/usr/bin/env python3
-"""生成 Sparkle appcast.xml 更新清单"""
-import hashlib
-import json
-import sys
+"""生成单版本 Sparkle appcast；签名由 Sparkle sign_update 产生。"""
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
 from pathlib import Path
-from datetime import datetime
+from xml.sax.saxutils import escape, quoteattr
 
-def generate_appcast(app_path: str, version: str, output_path: str = "appcast.xml"):
-    """生成 Sparkle appcast.xml"""
-    # 确保版本号不含 v 前缀，避免 URL 中出现 vv
-    version = version.lstrip('v')
-    app = Path(app_path)
-    if not app.exists():
-        print(f"错误: 文件不存在 {app}")
-        sys.exit(1)
 
-    # 计算 SHA-256
-    sha256 = hashlib.sha256(app.read_bytes()).hexdigest()
-    size = app.stat().st_size
-    pub_date = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
+def build_appcast(archive: Path, version: str, signature: str) -> str:
+    if not archive.is_file():
+        raise FileNotFoundError(archive)
+    if not signature:
+        raise ValueError("EdDSA signature 不能为空")
+    parts = version.split(".")
+    if len(parts) != 3 or not all(part.isdigit() for part in parts):
+        raise ValueError("version 必须是 x.y.z")
 
-    xml = f"""<?xml version="1.0" standalone="yes"?>
+    size = archive.stat().st_size
+    pub_date = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S %z")
+    download_url = (
+        "https://github.com/devotionn/Stock-Helper/releases/download/"
+        f"v{version}/StockHelper-{version}.zip"
+    )
+    return f'''<?xml version="1.0" encoding="utf-8"?>
 <rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
   <channel>
     <title>股票分析助手更新</title>
+    <link>https://github.com/devotionn/Stock-Helper/releases</link>
+    <description>股票分析助手正式更新</description>
+    <language>zh-CN</language>
     <item>
-      <title>版本 {version}</title>
+      <title>版本 {escape(version)}</title>
       <pubDate>{pub_date}</pubDate>
-      <sparkle:version>{version}</sparkle:version>
-      <sparkle:shortVersionString>{version}</sparkle:shortVersionString>
-      <sparkle:dsaSignature></sparkle:dsaSignature>
-      <!-- 需要使用 Sparkle 的 sign_update 工具生成 EdDSA 签名后填入 sparkle:edSignature -->
-      <enclosure
-        url="https://github.com/devotionn/Stock-Helper/releases/download/v{version}/StockHelper-{version}.zip"
-        sparkle:edSignature=""
-        length="{size}"
-        type="application/octet-stream"
-      />
-      <description>
-        <![CDATA[
-          <p>股票分析助手 {version} 更新</p>
-          <p>不会删除您的文字、图片和历史记录。</p>
-        ]]>
-      </description>
+      <sparkle:version>{escape(version)}</sparkle:version>
+      <sparkle:shortVersionString>{escape(version)}</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+        <p>股票分析助手 {escape(version)} 更新。</p>
+        <p>安装更新前会自动备份数据库和图片，不会覆盖个人资料。</p>
+      ]]></description>
+      <enclosure url={quoteattr(download_url)}
+        sparkle:edSignature={quoteattr(signature)}
+        length={quoteattr(str(size))}
+        type="application/octet-stream" />
     </item>
   </channel>
-</rss>"""
+</rss>
+'''
 
-    Path(output_path).write_text(xml, encoding="utf-8")
-    print(f"appcast.xml 已生成: {output_path}")
-    print(f"版本: {version}")
-    print(f"大小: {size} bytes")
-    print(f"SHA-256: {sha256}")
-    print("请使用 Sparkle 的 sign_update 工具生成 EdDSA 签名:")
-    print(f"  ./bin/sign_update {app_path} <private_key>")
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("archive", type=Path)
+    parser.add_argument("version")
+    parser.add_argument("signature")
+    parser.add_argument("output", type=Path)
+    args = parser.parse_args()
+    xml = build_appcast(args.archive, args.version.lstrip("v"), args.signature)
+    args.output.write_text(xml, encoding="utf-8")
+    print(f"appcast 已生成: {args.output}")
+
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("用法: python generate_appcast.py <app_zip_path> <version> [output_path]")
-        sys.exit(1)
-    generate_appcast(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "appcast.xml")
+    main()

@@ -11,209 +11,160 @@ permissions:
 jobs:
   release:
     runs-on: macos-15
-    env:
-      # 提到 job 级，使签名步骤的 if 条件能正确判断 secret 是否存在
-      SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: 解析并校验版本
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "版本标签必须是 vX.Y.Z，当前为 $GITHUB_REF_NAME"
+            exit 1
+          fi
+          CLEAN_VERSION="${GITHUB_REF_NAME#v}"
+          echo "clean=$CLEAN_VERSION" >> "$GITHUB_OUTPUT"
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
+          cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: 构建前端
+      - name: 安装并测试前端
         run: |
-          cd frontend && npm ci && npm run build
+          cd frontend
+          npm ci
+          npm run lint
+          npm run build
 
-      - name: 安装后端测试依赖
+      - name: 安装并测试后端
         run: |
           cd backend
           pip install -r requirements.txt -r requirements-dev.txt
-
-      - name: 运行后端测试
-        run: |
-          cd backend
+          ruff check app/ tests/
           python -m pytest tests/ -v
 
       - name: Release Secrets 预检
         env:
           SPARKLE_PUBLIC_KEY: ${{ secrets.SPARKLE_PUBLIC_KEY }}
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          SPARKLE_ARCHIVE_SHA256: ${{ secrets.SPARKLE_ARCHIVE_SHA256 }}
           MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           MACOS_CERTIFICATE_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        shell: bash
         run: |
-          for var_name in SPARKLE_PUBLIC_KEY SPARKLE_PRIVATE_KEY MACOS_CERTIFICATE_P12_BASE64 MACOS_CERTIFICATE_PASSWORD MACOS_CERTIFICATE_NAME APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD; do
-            var_value="${!var_name:-}"
-            if [ -z "$var_value" ]; then
-              echo "❌ 缺少必要配置：$var_name"
-              exit 1
-            else
-              echo "✅ $var_name 已配置"
-            fi
+          set -euo pipefail
+          for name in \
+            SPARKLE_PUBLIC_KEY SPARKLE_PRIVATE_KEY SPARKLE_ARCHIVE_SHA256 \
+            MACOS_CERTIFICATE_P12_BASE64 MACOS_CERTIFICATE_PASSWORD \
+            MACOS_CERTIFICATE_NAME APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD; do
+            [[ -n "${!name:-}" ]] || { echo "缺少必要配置: $name"; exit 1; }
           done
-          echo "所有必要配置已就绪"
 
       - name: 导入 Developer ID 证书
         env:
           MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_CERTIFICATE_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
+        shell: bash
         run: |
-          # 创建临时 Keychain
-          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          set -euo pipefail
+          KEYCHAIN_PATH="$RUNNER_TEMP/stock-helper-build.keychain-db"
           KEYCHAIN_PASSWORD="$(uuidgen)"
-          
+          CERT_PATH="$RUNNER_TEMP/developer-id.p12"
+          printf '%s' "$MACOS_CERTIFICATE_P12_BASE64" | base64 -D > "$CERT_PATH"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          
-          # 导入证书
-          CERT_PATH="$RUNNER_TEMP/certificate.p12"
-          echo "$MACOS_CERTIFICATE_P12_BASE64" | base64 -D > "$CERT_PATH"
           security import "$CERT_PATH" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-          
-          # 设置签名权限
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          
-          # 添加到搜索列表
-          security list-keychains -d user -s "$KEYCHAIN_PATH" "$(security list-keychains -d user | tr -d '\"')"
-          
-          # 验证证书已导入
-          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
-          
-          echo "证书导入成功"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH" | tee "$RUNNER_TEMP/identities.txt"
+          grep -F "$MACOS_CERTIFICATE_NAME" "$RUNNER_TEMP/identities.txt"
+          rm -f "$CERT_PATH"
 
-      - name: 安装后端依赖
-        run: |
-          cd backend
-          pip install -r requirements.txt
-          pip install pyinstaller
-
-      - name: 打包 .app
+      - name: 构建、签名并公证应用
         env:
-          APP_VERSION: ${{ github.ref_name }}
-          REQUIRE_SPARKLE: "1"
+          VERSION: ${{ steps.version.outputs.clean }}
+          RELEASE_MODE: '1'
+          ENABLE_SPARKLE: '1'
           SPARKLE_PUBLIC_KEY: ${{ secrets.SPARKLE_PUBLIC_KEY }}
+          SPARKLE_ARCHIVE_SHA256: ${{ secrets.SPARKLE_ARCHIVE_SHA256 }}
           MACOS_CERTIFICATE_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
           chmod +x packaging/macos/build_app.sh
-          VERSION=$APP_VERSION REQUIRE_SPARKLE=1 bash packaging/macos/build_app.sh
-          # 暴露不带 v 前缀的版本号供后续步骤使用（build_app.sh 内部已去 v 前缀）
-          echo "APP_VERSION_CLEAN=${APP_VERSION#v}" >> $GITHUB_ENV
+          packaging/macos/build_app.sh
 
-      - name: 冒烟测试
+      - name: 最终产物冒烟测试
         run: |
-          APP_VERSION_CLEAN="${{ github.ref_name }}"
-          APP_VERSION_CLEAN="${APP_VERSION_CLEAN#v}"
-          APP_PATH="dist/股票分析助手.app"
-          BACKEND="$APP_PATH/Contents/Resources/backend/stock-helper-server"
-          
-          echo "启动后端冒烟测试..."
-          "$BACKEND" &
-          PID=$!
-          
-          SUCCESS=0
-          for i in $(seq 1 30); do
-            if curl -sf http://127.0.0.1:8765/api/health > /dev/null 2>&1; then
-              echo "✅ 后端健康检查通过"
-              SUCCESS=1
-              break
-            fi
-            sleep 1
-          done
-          
-          # 停止后端
-          kill "$PID" 2>/dev/null
-          wait "$PID" 2>/dev/null || true
-          
-          if [ "$SUCCESS" = "0" ]; then
-            echo "❌ 后端冒烟测试失败"
-            exit 1
-          fi
-          
-          echo "冒烟测试通过"
+          chmod +x packaging/macos/smoke_test.sh
+          packaging/macos/smoke_test.sh "dist/股票分析助手.app" "${{ steps.version.outputs.clean }}"
 
-      - name: Sparkle EdDSA 签名
+      - name: 验证签名与公证票据
+        run: |
+          codesign --verify --deep --strict --verbose=2 "dist/股票分析助手.app"
+          xcrun stapler validate "dist/股票分析助手.app"
+          spctl --assess --type execute --verbose=2 "dist/股票分析助手.app"
+
+      - name: Sparkle EdDSA 签名并生成 appcast
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          VERSION: ${{ steps.version.outputs.clean }}
+        shell: bash
         run: |
-          APP_VERSION_CLEAN="${{ github.ref_name }}"
-          APP_VERSION_CLEAN="${APP_VERSION_CLEAN#v}"
-          ZIP_FILE="dist/StockHelper-${APP_VERSION_CLEAN}.zip"
-          
-          # 查找 sign_update 工具
-          SIGN_TOOL=$(find /tmp/sparkle_extract -name "sign_update" -type f 2>/dev/null | head -1)
-          
-          if [ -z "$SIGN_TOOL" ]; then
-            echo "错误: 找不到 sign_update 工具"
-            exit 1
-          fi
-          
-          if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
-            echo "错误: 缺少 SPARKLE_PRIVATE_KEY secret"
-            exit 1
-          fi
-          
-          # 通过 stdin 传私钥签名
-          SIGN_OUTPUT=$(printf '%s' "$SPARKLE_PRIVATE_KEY" | "$SIGN_TOOL" --ed-key-file - "$ZIP_FILE" 2>&1)
-          echo "签名输出: $SIGN_OUTPUT"
-          
-          # 提取 edSignature 的值（格式: sparkle:edSignature="xxx" length="yyy"）
-          SIGNATURE=$(echo "$SIGN_OUTPUT" | grep -o 'edSignature="[^"]*"' | head -1 | sed 's/edSignature="//;s/"//')
-          
-          if [ -z "$SIGNATURE" ]; then
-            echo "错误: 签名提取失败"
-            exit 1
-          fi
-          
-          echo "SIGNATURE=$SIGNATURE" >> $GITHUB_ENV
-          echo "签名成功: $SIGNATURE"
+          set -euo pipefail
+          ZIP_FILE="dist/StockHelper-${VERSION}.zip"
+          SIGN_TOOL="dist/sparkle-tools/sign_update"
+          [[ -x "$SIGN_TOOL" ]] || { echo "找不到 sign_update"; exit 1; }
+          SIGN_OUTPUT="$(printf '%s' "$SPARKLE_PRIVATE_KEY" | "$SIGN_TOOL" --ed-key-file - "$ZIP_FILE")"
+          SIGNATURE="$(printf '%s\n' "$SIGN_OUTPUT" | sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p' | head -1)"
+          [[ -n "$SIGNATURE" ]] || { echo "无法提取 Sparkle 签名"; exit 1; }
+          python packaging/macos/generate_appcast.py \
+            "$ZIP_FILE" "$VERSION" "$SIGNATURE" "dist/appcast.xml"
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse('dist/appcast.xml').getroot()
+          enclosure = root.find('./channel/item/enclosure')
+          assert enclosure is not None
+          signature = enclosure.attrib.get(
+              '{http://www.andymatuschak.org/xml-namespaces/sparkle}edSignature'
+          )
+          assert signature
+          assert enclosure.attrib['url'].endswith('.zip')
+          print('appcast XML 验证通过')
+          PY
 
-      - name: 生成 appcast
-        run: |
-          # 直接使用 build_app.sh 产物（已通过 ditto 生成 zip），不再重新压缩
-          python packaging/macos/generate_appcast.py "dist/StockHelper-${APP_VERSION_CLEAN}.zip" "${APP_VERSION_CLEAN}" "dist/appcast.xml"
-
-      - name: 注入签名到 appcast
-        run: |
-          if [ -n "$SIGNATURE" ]; then
-            sed -i '' "s|sparkle:edSignature=\"\"|sparkle:edSignature=\"$SIGNATURE\"|" dist/appcast.xml
-            echo "签名已注入 appcast.xml"
-          else
-            echo "错误: 签名为空，不能发布"
-            exit 1
-          fi
-
-      - name: 创建 Release
+      - name: 创建正式 Release
         uses: softprops/action-gh-release@v2
         with:
+          name: 股票分析助手 v${{ steps.version.outputs.clean }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
-            dist/StockHelper-${{ env.APP_VERSION_CLEAN }}.zip
+            dist/StockHelper-${{ steps.version.outputs.clean }}.zip
             dist/appcast.xml
           body: |
-            ## 股票助手 v${{ env.APP_VERSION_CLEAN }}
+            ## 股票分析助手 v${{ steps.version.outputs.clean }}
 
-            ### 更新内容
-            - 请在此处填写更新说明
-
-            ### 说明
-            - 不会删除您的文字、图片和历史记录
+            - 更新前自动备份客户资料
+            - 应用已完成 Developer ID 签名与 Apple 公证
             - 本分析仅供参考，不构成投资建议
           draft: false
           prerelease: false
 
-      - name: 清理 Keychain
+      - name: 清理临时 Keychain
         if: always()
         run: |
-          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
-          security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
+          security delete-keychain "$RUNNER_TEMP/stock-helper-build.keychain-db" 2>/dev/null || true

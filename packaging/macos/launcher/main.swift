@@ -1,4 +1,5 @@
 import Cocoa
+import Darwin
 import Foundation
 
 #if canImport(Sparkle)
@@ -13,34 +14,65 @@ func appendLog(_ message: String, toFile path: String) {
         if let data = line.data(using: .utf8) {
             handle.write(data)
         }
-        handle.closeFile()
+        try? handle.close()
     } else {
-        // 文件不存在，创建
         try? line.write(toFile: path, atomically: true, encoding: .utf8)
     }
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var backendProcess: Process?
+    var backendLogHandle: FileHandle?
     var statusBar: NSStatusItem?
+    var sessionToken: String?
+    var instanceLockFD: Int32 = -1
+
     #if canImport(Sparkle)
     var updaterController: SPUStandardUpdaterController?
     #endif
 
+    var dataDir: String {
+        NSHomeDirectory() + "/Library/Application Support/Stock Helper"
+    }
+
+    var logDir: String {
+        dataDir + "/logs"
+    }
+
+    var launcherLogPath: String {
+        logDir + "/launcher.log"
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // 0. 单实例检查
-        if isAlreadyRunning() {
-            openBrowser()
+        ensureRuntimeDirectories()
+
+        guard acquireInstanceLock() else {
+            appendLog("检测到另一个启动器实例", toFile: launcherLogPath)
+            if waitForExistingBackend(deadline: Date().addingTimeInterval(10)) {
+                openBrowser()
+            } else {
+                let alert = NSAlert()
+                alert.messageText = "股票分析助手正在启动"
+                alert.informativeText = "另一个股票分析助手正在启动，请稍等片刻后再点击应用图标。"
+                alert.runModal()
+            }
             NSApp.terminate(nil)
             return
         }
 
-        // 1. 启动后端
         launchBackend()
+        createStatusItem()
 
-        // 2. 等待后端就绪
-        DispatchQueue.global().async {
-            let success = self.waitForBackend()
+        #if canImport(Sparkle)
+        updaterController = SPUStandardUpdaterController(
+            startingUpdater: true,
+            updaterDelegate: self,
+            userDriverDelegate: nil
+        )
+        #endif
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let success = self.waitForBackend(deadline: Date().addingTimeInterval(30))
             DispatchQueue.main.async {
                 if success {
                     self.openBrowser()
@@ -49,110 +81,63 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
-
-        // 3. 创建状态栏图标
-        createStatusItem()
-
-        // 4. 初始化 Sparkle 自动更新
-        #if canImport(Sparkle)
-        updaterController = SPUStandardUpdaterController(
-            startingUpdater: true,
-            updaterDelegate: nil,
-            userDriverDelegate: nil
-        )
-        #endif
     }
 
-    func isAlreadyRunning() -> Bool {
-        // 尝试连接已有服务
-        guard let url = URL(string: "http://127.0.0.1:8765/api/health") else { return false }
-        let semaphore = DispatchSemaphore(value: 0)
-        var running = false
-
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 2.0
-
-        let task = URLSession.shared.dataTask(with: request) { _, response, _ in
-            if let r = response as? HTTPURLResponse, r.statusCode == 200 {
-                running = true
-            }
-            semaphore.signal()
-        }
-        task.resume()
-        semaphore.wait()
-
-        if running {
-            // 记录日志
-            let dataDir = NSHomeDirectory() + "/Library/Application Support/Stock Helper"
-            let logDir = dataDir + "/logs"
-            appendLog("检测到已有实例运行，直接打开浏览器", toFile: logDir + "/launcher.log")
-        }
-
-        return running
-    }
-
-    func launchBackend() {
-        let bundlePath = Bundle.main.bundlePath
-        let backendPath = bundlePath + "/Contents/Resources/backend/stock-helper-server"
-        let dataDir = NSHomeDirectory() + "/Library/Application Support/Stock Helper"
-        let logDir = dataDir + "/logs"
-
-        // 确保目录存在
+    func ensureRuntimeDirectories() {
         let fm = FileManager.default
         try? fm.createDirectory(atPath: dataDir, withIntermediateDirectories: true)
         try? fm.createDirectory(atPath: logDir, withIntermediateDirectories: true)
+    }
 
-        // 日志文件
-        let logPath = logDir + "/backend.log"
-        let launcherLogPath = logDir + "/launcher.log"
-
-        // 记录启动器日志
-        appendLog("启动股票分析助手...", toFile: launcherLogPath)
-
-        backendProcess = Process()
-        backendProcess?.executableURL = URL(fileURLWithPath: backendPath)
-        backendProcess?.arguments = []
-        var env = ProcessInfo.processInfo.environment
-        env["STOCK_DATA_DIR"] = dataDir
-
-        // 传递应用版本号给后端
-        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
-        env["STOCK_APP_VERSION"] = appVersion
-
-        backendProcess?.environment = env
-
-        // 保留旧日志：将旧的 backend.log 重命名为带时间戳的备份，仅保留最近5份
-        if fm.fileExists(atPath: logPath) {
-            let oldTimestamp = DateFormatter()
-            oldTimestamp.dateFormat = "yyyyMMdd-HHmmss"
-            let backupPath = logDir + "/backend-\(oldTimestamp.string(from: Date())).log"
-            try? fm.moveItem(atPath: logPath, toPath: backupPath)
-
-            // 清理超过5份的旧日志
-            if let logs = try? fm.contentsOfDirectory(atPath: logDir) {
-                let oldLogs = logs.filter { $0.hasPrefix("backend-") && $0.hasSuffix(".log") }
-                    .sorted().reversed()
-                for oldLog in oldLogs.dropFirst(4) {
-                    try? fm.removeItem(atPath: logDir + "/" + oldLog)
-                }
-            }
+    func acquireInstanceLock() -> Bool {
+        let lockPath = dataDir + "/stock-helper.lock"
+        let fd = lockPath.withCString {
+            Darwin.open($0, O_CREAT | O_RDWR, mode_t(S_IRUSR | S_IWUSR))
         }
+        guard fd >= 0 else {
+            appendLog("无法创建单实例锁文件", toFile: launcherLogPath)
+            return false
+        }
+        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+            Darwin.close(fd)
+            return false
+        }
+        instanceLockFD = fd
+        return true
+    }
 
-        // 确保日志文件存在，以便 FileHandle 可打开
+    func releaseInstanceLock() {
+        guard instanceLockFD >= 0 else { return }
+        flock(instanceLockFD, LOCK_UN)
+        Darwin.close(instanceLockFD)
+        instanceLockFD = -1
+    }
+
+    func launchBackend() {
+        let backendPath = Bundle.main.bundlePath + "/Contents/Resources/backend/stock-helper-server"
+        let logPath = logDir + "/backend.log"
+        let fm = FileManager.default
+
+        appendLog("启动股票分析助手...", toFile: launcherLogPath)
+        rotateBackendLogs(fileManager: fm, currentLogPath: logPath)
         if !fm.fileExists(atPath: logPath) {
             fm.createFile(atPath: logPath, contents: nil)
         }
 
-        // 重定向 stdout/stderr 到日志文件
-        let logFile = FileHandle(forWritingAtPath: logPath)
-        if let logFile = logFile {
-            backendProcess?.standardOutput = logFile
-            backendProcess?.standardError = logFile
-        }
+        backendProcess = Process()
+        backendProcess?.executableURL = URL(fileURLWithPath: backendPath)
+        var env = ProcessInfo.processInfo.environment
+        env["STOCK_DATA_DIR"] = dataDir
+        env["STOCK_APP_VERSION"] = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
+        backendProcess?.environment = env
+
+        backendLogHandle = FileHandle(forWritingAtPath: logPath)
+        backendProcess?.standardOutput = backendLogHandle
+        backendProcess?.standardError = backendLogHandle
 
         do {
             try backendProcess?.run()
-            appendLog("后端进程已启动", toFile: launcherLogPath)
+            appendLog("后端进程已启动，PID=\(backendProcess?.processIdentifier ?? -1)", toFile: launcherLogPath)
         } catch {
             appendLog("后端启动失败: \(error.localizedDescription)", toFile: launcherLogPath)
             let alert = NSAlert()
@@ -163,52 +148,114 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func waitForBackend() -> Bool {
-        let baseURL = "http://127.0.0.1:8765"
-        guard let sessionURL = URL(string: "\(baseURL)/api/session") else { return false }
+    func rotateBackendLogs(fileManager fm: FileManager, currentLogPath: String) {
+        guard fm.fileExists(atPath: currentLogPath) else { return }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss-SSS"
+        let backupPath = logDir + "/backend-\(formatter.string(from: Date())).log"
+        try? fm.moveItem(atPath: currentLogPath, toPath: backupPath)
 
-        for _ in 0..<30 {
-            let semaphore = DispatchSemaphore(value: 0)
-            var token: String?
+        guard let logs = try? fm.contentsOfDirectory(atPath: logDir) else { return }
+        let oldLogs = logs
+            .filter { $0.hasPrefix("backend-") && $0.hasSuffix(".log") }
+            .sorted(by: >)
+        for oldLog in oldLogs.dropFirst(5) {
+            try? fm.removeItem(atPath: logDir + "/" + oldLog)
+        }
+    }
 
-            var sessionRequest = URLRequest(url: sessionURL)
-            sessionRequest.timeoutInterval = 3.0
-            let task = URLSession.shared.dataTask(with: sessionRequest) { data, response, _ in
-                if let r = response as? HTTPURLResponse, r.statusCode == 200,
-                   let data = data,
-                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let t = json["token"] as? String {
-                    token = t
-                }
-                semaphore.signal()
+    func waitForExistingBackend(deadline: Date) -> Bool {
+        while Date() < deadline {
+            if fetchHealthIdentity()?.app == "stock-helper" {
+                return true
             }
-            task.resume()
-            semaphore.wait()
-
-            if let token = token {
-                // /api/health 现在免令牌，但仍然带上令牌以防万一
-                guard let healthURL = URL(string: "\(baseURL)/api/health") else { return false }
-                var healthRequest = URLRequest(url: healthURL)
-                healthRequest.setValue(token, forHTTPHeaderField: "X-Session-Token")
-                healthRequest.setValue("127.0.0.1:8765", forHTTPHeaderField: "Host")
-                healthRequest.timeoutInterval = 3.0
-
-                let healthSem = DispatchSemaphore(value: 0)
-                var success = false
-                let healthTask = URLSession.shared.dataTask(with: healthRequest) { _, response, _ in
-                    if let r = response as? HTTPURLResponse, r.statusCode == 200 {
-                        success = true
-                    }
-                    healthSem.signal()
-                }
-                healthTask.resume()
-                healthSem.wait()
-
-                if success { return true }
-            }
-            Thread.sleep(forTimeInterval: 1.0)
+            Thread.sleep(forTimeInterval: 0.25)
         }
         return false
+    }
+
+    func waitForBackend(deadline: Date) -> Bool {
+        while Date() < deadline {
+            if sessionToken == nil {
+                sessionToken = fetchSessionToken()
+            }
+            if sessionToken != nil, let health = fetchHealthIdentity(), health.app == "stock-helper" {
+                appendLog("后端健康检查通过，版本=\(health.version)", toFile: launcherLogPath)
+                return true
+            }
+            if let process = backendProcess, !process.isRunning {
+                appendLog("后端进程提前退出，状态=\(process.terminationStatus)", toFile: launcherLogPath)
+                return false
+            }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+        appendLog("后端健康检查超时", toFile: launcherLogPath)
+        return false
+    }
+
+    struct HealthResponse: Decodable {
+        let status: String
+        let app: String
+        let version: String
+        let instance_id: String
+        let pid: Int32
+    }
+
+    func fetchSessionToken() -> String? {
+        guard let url = URL(string: "http://127.0.0.1:8765/api/session") else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 1.0
+        guard let data = synchronousData(request: request).data,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return json["token"] as? String
+    }
+
+    func fetchHealthIdentity() -> HealthResponse? {
+        guard let url = URL(string: "http://127.0.0.1:8765/api/health") else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 1.0
+        request.setValue("127.0.0.1:8765", forHTTPHeaderField: "Host")
+        if let token = sessionToken {
+            request.setValue(token, forHTTPHeaderField: "X-Session-Token")
+        }
+        let result = synchronousData(request: request)
+        guard result.statusCode == 200, let data = result.data else { return nil }
+        return try? JSONDecoder().decode(HealthResponse.self, from: data)
+    }
+
+    func synchronousData(request: URLRequest) -> (data: Data?, statusCode: Int?) {
+        let semaphore = DispatchSemaphore(value: 0)
+        var responseData: Data?
+        var statusCode: Int?
+        let task = URLSession.shared.dataTask(with: request) { data, response, _ in
+            responseData = data
+            statusCode = (response as? HTTPURLResponse)?.statusCode
+            semaphore.signal()
+        }
+        task.resume()
+        let timeout = max(1.0, request.timeoutInterval + 0.5)
+        if semaphore.wait(timeout: .now() + timeout) == .timedOut {
+            task.cancel()
+            return (nil, nil)
+        }
+        return (responseData, statusCode)
+    }
+
+    func createUpdateBackup() -> Bool {
+        guard let token = sessionToken,
+              let url = URL(string: "http://127.0.0.1:8765/api/backup")
+        else { return false }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 120.0
+        request.setValue("127.0.0.1:8765", forHTTPHeaderField: "Host")
+        request.setValue(token, forHTTPHeaderField: "X-Session-Token")
+        let result = synchronousData(request: request)
+        guard result.statusCode == 200, let data = result.data,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return false }
+        return json["success"] as? Bool == true
     }
 
     func showLaunchError() {
@@ -220,6 +267,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func openBrowser() {
+        guard fetchHealthIdentity()?.app == "stock-helper" else { return }
         if let url = URL(string: "http://127.0.0.1:8765") {
             NSWorkspace.shared.open(url)
         }
@@ -227,10 +275,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func createStatusItem() {
         statusBar = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        if let button = statusBar?.button {
-            button.title = "📈"
-        }
-
+        statusBar?.button?.title = "📈"
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "打开股票分析助手", action: #selector(openApp), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "检查更新", action: #selector(checkForUpdates), keyEquivalent: ""))
@@ -251,52 +296,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         #else
         let alert = NSAlert()
         alert.messageText = "自动更新不可用"
-        alert.informativeText = "此版本未集成自动更新功能，请手动下载最新版本。"
+        alert.informativeText = "此版本未集成自动更新功能，请联系维护人员。"
         alert.runModal()
         #endif
     }
 
     @objc func exportDiagnostics() {
-        let dataDir = NSHomeDirectory() + "/Library/Application Support/Stock Helper"
-        let logDir = dataDir + "/logs"
-
-        // 创建诊断信息文件
         let diagPath = dataDir + "/diagnostic_report.txt"
         let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .full, timeStyle: .full)
-
+        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "未知"
         var report = "=== 股票分析助手诊断报告 ===\n"
-        report += "时间: \(timestamp)\n"
-        report += "应用路径: \(Bundle.main.bundlePath)\n"
-        report += "数据目录: \(dataDir)\n\n"
-
-        // 后端进程状态
-        if let p = backendProcess {
-            report += "后端进程PID: \(p.processIdentifier)\n"
-            report += "后端运行中: \(p.isRunning)\n"
+        report += "时间: \(timestamp)\n版本: \(appVersion)\n"
+        report += "应用路径: \(Bundle.main.bundlePath)\n数据目录: \(dataDir)\n\n"
+        if let process = backendProcess {
+            report += "后端进程PID: \(process.processIdentifier)\n后端运行中: \(process.isRunning)\n"
         } else {
             report += "后端进程: 未创建\n"
         }
-
-        // 日志文件
         report += "\n=== launcher.log ===\n"
-        if let content = try? String(contentsOfFile: logDir + "/launcher.log", encoding: .utf8) {
-            report += content
-        } else {
-            report += "(无日志)\n"
-        }
-
+        report += (try? String(contentsOfFile: launcherLogPath, encoding: .utf8)) ?? "(无日志)\n"
         report += "\n=== backend.log (最后100行) ===\n"
         if let content = try? String(contentsOfFile: logDir + "/backend.log", encoding: .utf8) {
             let lines = content.components(separatedBy: "\n")
-            let start = max(0, lines.count - 100)
-            report += lines[start...].joined(separator: "\n")
+            report += lines.suffix(100).joined(separator: "\n")
         } else {
             report += "(无日志)\n"
         }
-
         try? report.write(toFile: diagPath, atomically: true, encoding: .utf8)
-
-        // 在 Finder 中显示
         NSWorkspace.shared.selectFile(diagPath, inFileViewerRootedAtPath: dataDir)
     }
 
@@ -306,33 +332,59 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func shutdownBackend() {
-        guard let p = backendProcess, p.isRunning else { return }
-
-        let dataDir = NSHomeDirectory() + "/Library/Application Support/Stock Helper"
-        let logDir = dataDir + "/logs"
-
-        // 发送 SIGTERM
-        p.terminate()
-
-        // 等待最多 5 秒
+        guard let process = backendProcess, process.isRunning else {
+            try? backendLogHandle?.close()
+            backendLogHandle = nil
+            return
+        }
+        process.terminate()
         let deadline = Date().addingTimeInterval(5.0)
-        while p.isRunning && Date() < deadline {
+        while process.isRunning && Date() < deadline {
             Thread.sleep(forTimeInterval: 0.1)
         }
-
-        // 如果仍在运行，强制结束
-        if p.isRunning {
-            kill(p.processIdentifier, SIGKILL)
-            Thread.sleep(forTimeInterval: 0.5)
+        if process.isRunning {
+            kill(process.processIdentifier, SIGKILL)
+            process.waitUntilExit()
         }
-
-        appendLog("后端进程已停止 (PID: \(p.processIdentifier))", toFile: logDir + "/launcher.log")
+        try? backendLogHandle?.close()
+        backendLogHandle = nil
+        appendLog("后端进程已停止，PID=\(process.processIdentifier)", toFile: launcherLogPath)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         shutdownBackend()
+        releaseInstanceLock()
     }
 }
+
+#if canImport(Sparkle)
+extension AppDelegate: SPUUpdaterDelegate {
+    func updater(
+        _ updater: SPUUpdater,
+        shouldPostponeRelaunchForUpdate item: SUAppcastItem,
+        untilInvokingBlock installHandler: @escaping () -> Void
+    ) -> Bool {
+        appendLog("准备安装更新 \(item.displayVersionString)，先创建数据备份", toFile: launcherLogPath)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let backupSucceeded = self.createUpdateBackup()
+            DispatchQueue.main.async {
+                guard backupSucceeded else {
+                    appendLog("更新前备份失败，已阻止本次更新", toFile: self.launcherLogPath)
+                    let alert = NSAlert()
+                    alert.messageText = "更新暂未安装"
+                    alert.informativeText = "更新前备份失败。您的资料没有被修改，请检查备份位置或磁盘空间后再次更新。"
+                    alert.runModal()
+                    return
+                }
+                appendLog("更新前备份成功，开始安装更新", toFile: self.launcherLogPath)
+                self.shutdownBackend()
+                installHandler()
+            }
+        }
+        return true
+    }
+}
+#endif
 
 let app = NSApplication.shared
 let delegate = AppDelegate()
