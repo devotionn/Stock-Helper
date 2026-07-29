@@ -18,9 +18,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 2. 等待后端就绪
         DispatchQueue.global().async {
-            self.waitForBackend()
+            let success = self.waitForBackend()
             DispatchQueue.main.async {
-                self.openBrowser()
+                if success {
+                    self.openBrowser()
+                } else {
+                    self.showLaunchError()
+                }
             }
         }
 
@@ -41,10 +45,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let bundlePath = Bundle.main.bundlePath
         let backendPath = bundlePath + "/Contents/Resources/backend/stock-helper-server"
         let dataDir = NSHomeDirectory() + "/Library/Application Support/Stock Helper"
+        let logDir = dataDir + "/logs"
 
-        // 确保数据目录存在
+        // 确保目录存在
         let fm = FileManager.default
         try? fm.createDirectory(atPath: dataDir, withIntermediateDirectories: true)
+        try? fm.createDirectory(atPath: logDir, withIntermediateDirectories: true)
+
+        // 日志文件
+        let logPath = logDir + "/backend.log"
+        let launcherLogPath = logDir + "/launcher.log"
+
+        // 记录启动器日志
+        let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .short, timeStyle: .medium)
+        try? "[\(timestamp)] 启动股票分析助手...\n".write(toFile: launcherLogPath, atomically: true, encoding: .utf8)
 
         backendProcess = Process()
         backendProcess?.executableURL = URL(fileURLWithPath: backendPath)
@@ -53,21 +67,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         env["STOCK_DATA_DIR"] = dataDir
         backendProcess?.environment = env
 
+        // 重定向 stdout/stderr 到日志文件
+        let logFile = FileHandle(forWritingAtPath: logPath)
+        if let logFile = logFile {
+            // 清空旧日志
+            logFile.truncateFile(atOffset: 0)
+            backendProcess?.standardOutput = logFile
+            backendProcess?.standardError = logFile
+        }
+
         do {
             try backendProcess?.run()
+            try? "[\(timestamp)] 后端进程已启动\n".write(toFile: launcherLogPath, atomically: true, encoding: .utf8)
         } catch {
+            try? "[\(timestamp)] 后端启动失败: \(error.localizedDescription)\n".write(toFile: launcherLogPath, atomically: true, encoding: .utf8)
             let alert = NSAlert()
             alert.messageText = "启动失败"
-            alert.informativeText = "无法启动后端服务: \(error.localizedDescription)"
+            alert.informativeText = "无法启动后端服务: \(error.localizedDescription)\n\n请重新打开应用；如仍失败，请联系维护人员。"
             alert.runModal()
             NSApp.terminate(nil)
         }
     }
 
-    func waitForBackend() {
+    func waitForBackend() -> Bool {
         let baseURL = "http://127.0.0.1:8765"
-        // 先获取会话令牌
-        guard let sessionURL = URL(string: "\(baseURL)/api/session") else { return }
+        guard let sessionURL = URL(string: "\(baseURL)/api/session") else { return false }
+
         for _ in 0..<30 {
             let semaphore = DispatchSemaphore(value: 0)
             var token: String?
@@ -85,8 +110,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             semaphore.wait()
 
             if let token = token {
-                // 用令牌检查健康
-                guard let healthURL = URL(string: "\(baseURL)/api/health") else { return }
+                // /api/health 现在免令牌，但仍然带上令牌以防万一
+                guard let healthURL = URL(string: "\(baseURL)/api/health") else { return false }
                 var healthRequest = URLRequest(url: healthURL)
                 healthRequest.setValue(token, forHTTPHeaderField: "X-Session-Token")
                 healthRequest.setValue("127.0.0.1:8765", forHTTPHeaderField: "Host")
@@ -102,12 +127,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 healthTask.resume()
                 healthSem.wait()
 
-                if success { return }
+                if success { return true }
             }
             Thread.sleep(forTimeInterval: 1.0)
         }
-        // 30秒后仍未就绪，也尝试打开浏览器
-        print("后端健康检查超时，仍尝试打开浏览器")
+        return false
+    }
+
+    func showLaunchError() {
+        let alert = NSAlert()
+        alert.messageText = "股票分析助手启动失败"
+        alert.informativeText = "后端服务未能正常启动。\n\n请重新打开应用；如仍失败，请点击菜单栏图标选择「导出诊断信息」并发送给维护人员。"
+        alert.addButton(withTitle: "确定")
+        alert.runModal()
     }
 
     func openBrowser() {
@@ -126,6 +158,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "打开股票分析助手", action: #selector(openApp), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "检查更新", action: #selector(checkForUpdates), keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
+        menu.addItem(NSMenuItem(title: "导出诊断信息", action: #selector(exportDiagnostics), keyEquivalent: ""))
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "退出股票分析助手", action: #selector(quitApp), keyEquivalent: "q"))
         statusBar?.menu = menu
     }
@@ -143,6 +177,50 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         alert.informativeText = "此版本未集成自动更新功能，请手动下载最新版本。"
         alert.runModal()
         #endif
+    }
+
+    @objc func exportDiagnostics() {
+        let dataDir = NSHomeDirectory() + "/Library/Application Support/Stock Helper"
+        let logDir = dataDir + "/logs"
+
+        // 创建诊断信息文件
+        let diagPath = dataDir + "/diagnostic_report.txt"
+        let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .full, timeStyle: .full)
+
+        var report = "=== 股票分析助手诊断报告 ===\n"
+        report += "时间: \(timestamp)\n"
+        report += "应用路径: \(Bundle.main.bundlePath)\n"
+        report += "数据目录: \(dataDir)\n\n"
+
+        // 后端进程状态
+        if let p = backendProcess {
+            report += "后端进程PID: \(p.processIdentifier)\n"
+            report += "后端运行中: \(p.isRunning)\n"
+        } else {
+            report += "后端进程: 未创建\n"
+        }
+
+        // 日志文件
+        report += "\n=== launcher.log ===\n"
+        if let content = try? String(contentsOfFile: logDir + "/launcher.log", encoding: .utf8) {
+            report += content
+        } else {
+            report += "(无日志)\n"
+        }
+
+        report += "\n=== backend.log (最后100行) ===\n"
+        if let content = try? String(contentsOfFile: logDir + "/backend.log", encoding: .utf8) {
+            let lines = content.components(separatedBy: "\n")
+            let start = max(0, lines.count - 100)
+            report += lines[start...].joined(separator: "\n")
+        } else {
+            report += "(无日志)\n"
+        }
+
+        try? report.write(toFile: diagPath, atomically: true, encoding: .utf8)
+
+        // 在 Finder 中显示
+        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: dataDir)
     }
 
     @objc func quitApp() {

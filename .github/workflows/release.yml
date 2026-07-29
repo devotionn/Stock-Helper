@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       # 提到 job 级，使签名步骤的 if 条件能正确判断 secret 是否存在
       SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
@@ -48,41 +48,67 @@ jobs:
       - name: 打包 .app
         env:
           APP_VERSION: ${{ github.ref_name }}
+          REQUIRE_SPARKLE: "1"
+          SPARKLE_PUBLIC_KEY: ${{ secrets.SPARKLE_PUBLIC_KEY }}
+          MACOS_CERTIFICATE_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
           chmod +x packaging/macos/build_app.sh
-          VERSION=$APP_VERSION bash packaging/macos/build_app.sh
+          VERSION=$APP_VERSION REQUIRE_SPARKLE=1 bash packaging/macos/build_app.sh
           # 暴露不带 v 前缀的版本号供后续步骤使用（build_app.sh 内部已去 v 前缀）
           echo "APP_VERSION_CLEAN=${APP_VERSION#v}" >> $GITHUB_ENV
 
-      - name: Sparkle 签名
-        if: env.SPARKLE_PRIVATE_KEY != ''
+      - name: Sparkle EdDSA 签名
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
-          # 定位 sign_update 工具（build_app.sh 已将 Sparkle 解压到 /tmp/sparkle_extract）
-          SIGN_TOOL="/tmp/sparkle_extract/Sparkle.framework/Resources/bin/sign_update"
-          if [ ! -x "$SIGN_TOOL" ]; then
-            SIGN_TOOL=$(find /tmp/sparkle_extract -name sign_update -type f 2>/dev/null | head -1)
+          APP_VERSION_CLEAN="${{ github.ref_name }}"
+          APP_VERSION_CLEAN="${APP_VERSION_CLEAN#v}"
+          ZIP_FILE="dist/StockHelper-${APP_VERSION_CLEAN}.zip"
+          
+          # 查找 sign_update 工具
+          SIGN_TOOL=$(find /tmp/sparkle_extract -name "sign_update" -type f 2>/dev/null | head -1)
+          
+          if [ -z "$SIGN_TOOL" ]; then
+            echo "错误: 找不到 sign_update 工具"
+            exit 1
           fi
-          if [ -z "$SIGN_TOOL" ] || [ ! -x "$SIGN_TOOL" ]; then
-            echo "警告: 未找到 sign_update 工具，跳过 EdDSA 签名"
-            exit 0
+          
+          if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
+            echo "错误: 缺少 SPARKLE_PRIVATE_KEY secret"
+            exit 1
           fi
-          # 使用 Sparkle 的 sign_update 工具签名
-          SIGNATURE=$("$SIGN_TOOL" "dist/StockHelper-${APP_VERSION_CLEAN}.zip" -p "$SPARKLE_PRIVATE_KEY" 2>&1 | head -1)
+          
+          # 通过 stdin 传私钥签名
+          SIGN_OUTPUT=$(printf '%s' "$SPARKLE_PRIVATE_KEY" | "$SIGN_TOOL" --ed-key-file - "$ZIP_FILE" 2>&1)
+          echo "签名输出: $SIGN_OUTPUT"
+          
+          # 提取 edSignature 的值（格式: sparkle:edSignature="xxx" length="yyy"）
+          SIGNATURE=$(echo "$SIGN_OUTPUT" | grep -o 'edSignature="[^"]*"' | head -1 | sed 's/edSignature="//;s/"//')
+          
+          if [ -z "$SIGNATURE" ]; then
+            echo "错误: 签名提取失败"
+            exit 1
+          fi
+          
           echo "SIGNATURE=$SIGNATURE" >> $GITHUB_ENV
-          echo "签名结果: $SIGNATURE"
+          echo "签名成功: $SIGNATURE"
 
       - name: 生成 appcast
         run: |
           # 直接使用 build_app.sh 产物（已通过 ditto 生成 zip），不再重新压缩
           python packaging/macos/generate_appcast.py "dist/StockHelper-${APP_VERSION_CLEAN}.zip" "${APP_VERSION_CLEAN}" "dist/appcast.xml"
-          # 若存在有效的 Sparkle 签名，替换 appcast 中的空 edSignature
-          if [ -n "$SIGNATURE" ] && echo "$SIGNATURE" | grep -q "^edSignature:"; then
-            # sign_update 输出格式: edSignature:xxx length=yyy，取首个 token 作为签名值
-            SIG_VALUE=$(echo "$SIGNATURE" | awk '{print $1}')
-            sed -i '' "s|sparkle:edSignature=\"\"|sparkle:edSignature=\"${SIG_VALUE}\"|" dist/appcast.xml
-            echo "已注入 EdDSA 签名: $SIG_VALUE"
+
+      - name: 注入签名到 appcast
+        run: |
+          if [ -n "$SIGNATURE" ]; then
+            sed -i '' "s/sparkle:edSignature=\"\"/sparkle:edSignature=\"$SIGNATURE\"/" dist/appcast.xml
+            echo "签名已注入 appcast.xml"
           else
-            echo "未提供有效签名 ($SIGNATURE)，appcast 中 edSignature 留空"
+            echo "错误: 签名为空，不能发布"
+            exit 1
           fi
 
       - name: 创建 Release
@@ -100,5 +126,5 @@ jobs:
             ### 说明
             - 不会删除您的文字、图片和历史记录
             - 本分析仅供参考，不构成投资建议
-          draft: true
-          prerelease: true
+          draft: false
+          prerelease: false

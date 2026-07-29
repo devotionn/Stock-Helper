@@ -16,6 +16,9 @@ APP_VERSION="${VERSION:-1.0.0}"
 APP_VERSION="${APP_VERSION#v}"
 echo "版本号: $APP_VERSION"
 
+# Sparkle 公钥（写入 Info.plist 的 SUPublicEDKey），从环境变量读取，允许为空
+SPARKLE_PUBLIC_KEY="${SPARKLE_PUBLIC_KEY:-}"
+
 # 1. 构建前端
 echo "[1/7] 构建前端..."
 cd "$PROJECT_ROOT/frontend"
@@ -76,7 +79,7 @@ cat > "$APP_DIR/Contents/Info.plist" << PLIST
     <key>SUScheduledCheckInterval</key>
     <integer>86400</integer>
     <key>SUPublicEDKey</key>
-    <string>待生成</string>
+    <string>${SPARKLE_PUBLIC_KEY}</string>
 </dict>
 </plist>
 PLIST
@@ -89,6 +92,9 @@ curl -L "$SPARKLE_URL" -o /tmp/sparkle.tar.xz
 mkdir -p /tmp/sparkle_extract
 tar -xf /tmp/sparkle.tar.xz -C /tmp/sparkle_extract
 cp -R /tmp/sparkle_extract/Sparkle.framework "$APP_DIR/Contents/Frameworks/"
+
+# 正式发布时要求 Sparkle 必须编译成功（REQUIRE_SPARKLE=1），开发测试允许回退
+REQUIRE_SPARKLE="${REQUIRE_SPARKLE:-0}"
 
 # 5. 编译 Swift 启动器
 echo "[5/7] 编译 Swift 启动器..."
@@ -105,7 +111,11 @@ if [ -d "$APP_DIR/Contents/Frameworks/Sparkle.framework" ]; then
         -Xlinker -rpath \
         -Xlinker "@executable_path/../Frameworks" \
         -o "$APP_DIR/Contents/MacOS/StockHelperLauncher" 2>/dev/null || {
-        echo "Sparkle 编译失败，回退到不带 Sparkle 编译..."
+        if [ "$REQUIRE_SPARKLE" = "1" ]; then
+            echo "错误: Sparkle 编译失败，正式发布不允许跳过"
+            exit 1
+        fi
+        echo "Sparkle 编译失败，回退到不带 Sparkle 的版本..."
         swiftc \
             "$LAUNCHER_DIR/main.swift" \
             -framework Cocoa \
@@ -123,6 +133,60 @@ if [ ! -f "$APP_DIR/Contents/MacOS/StockHelperLauncher" ]; then
     exit 1
 fi
 echo "Swift 启动器编译成功"
+
+# 6a. Developer ID 签名（如果证书存在）
+DEVELOPER_ID="${MACOS_CERTIFICATE_NAME:-}"
+if [ -n "$DEVELOPER_ID" ]; then
+    echo "  对 Sparkle Framework 签名..."
+    codesign --force --deep --strict --sign "$DEVELOPER_ID" \
+        --options runtime --timestamp \
+        "$APP_DIR/Contents/Frameworks/Sparkle.framework"
+
+    echo "  对后端二进制签名..."
+    codesign --force --sign "$DEVELOPER_ID" \
+        --options runtime --timestamp \
+        "$APP_DIR/Contents/Resources/backend/stock-helper-server"
+
+    echo "  对 Swift 启动器签名..."
+    codesign --force --sign "$DEVELOPER_ID" \
+        --options runtime --timestamp \
+        "$APP_DIR/Contents/MacOS/StockHelperLauncher"
+
+    echo "  对整个 .app 签名..."
+    codesign --force --deep --strict --sign "$DEVELOPER_ID" \
+        --options runtime --timestamp \
+        "$APP_DIR"
+
+    echo "  验证签名..."
+    codesign --verify --deep --strict --verbose=2 "$APP_DIR"
+    echo "  签名验证通过"
+fi
+
+# 6b. Apple 公证（如果凭据存在）
+NOTARY_APPLE_ID="${APPLE_ID:-}"
+NOTARY_TEAM_ID="${APPLE_TEAM_ID:-}"
+NOTARY_PASSWORD="${APPLE_APP_PASSWORD:-}"
+if [ -n "$NOTARY_APPLE_ID" ] && [ -n "$NOTARY_TEAM_ID" ] && [ -n "$NOTARY_PASSWORD" ]; then
+    echo "  生成公证用 ZIP..."
+    NOTARY_ZIP="$DIST_DIR/notary_temp.zip"
+    ditto -c -k --keepParent "$APP_DIR" "$NOTARY_ZIP"
+
+    echo "  提交 Apple 公证..."
+    xcrun notarytool submit "$NOTARY_ZIP" \
+        --apple-id "$NOTARY_APPLE_ID" \
+        --team-id "$NOTARY_TEAM_ID" \
+        --password "$NOTARY_PASSWORD" \
+        --wait
+
+    echo "  写入公证票据..."
+    xcrun stapler staple "$APP_DIR"
+
+    echo "  验证公证..."
+    spctl --assess --type execute --verbose "$APP_DIR"
+    echo "  公证验证通过"
+
+    rm -f "$NOTARY_ZIP"
+fi
 
 # 6. 创建分发包 zip
 echo "[6/7] 创建分发包..."
