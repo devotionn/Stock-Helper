@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   backend-test:
     runs-on: ubuntu-latest
@@ -56,6 +60,20 @@ jobs:
           node-version: '20'
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+
+      - name: 准备无交互测试 Keychain
+        shell: bash
+        run: |
+          set -euo pipefail
+          SMOKE_KEYCHAIN="$RUNNER_TEMP/stock-helper-smoke.keychain-db"
+          SMOKE_KEYCHAIN_PASSWORD="stock-helper-ci-keychain"
+          security delete-keychain "$SMOKE_KEYCHAIN" >/dev/null 2>&1 || true
+          security create-keychain -p "$SMOKE_KEYCHAIN_PASSWORD" "$SMOKE_KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$SMOKE_KEYCHAIN"
+          security unlock-keychain -p "$SMOKE_KEYCHAIN_PASSWORD" "$SMOKE_KEYCHAIN"
+          security default-keychain -d user -s "$SMOKE_KEYCHAIN"
+          security list-keychains -d user -s "$SMOKE_KEYCHAIN"
+
       - name: 构建含 Sparkle 的无签名内部测试版
         env:
           VERSION: 0.0.0
@@ -65,14 +83,26 @@ jobs:
           SPARKLE_PUBLIC_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
           GITHUB_API_TOKEN: ${{ github.token }}
         run: |
-          chmod +x packaging/macos/build_app.sh packaging/macos/smoke_test.sh
+          chmod +x packaging/macos/build_app.sh
           packaging/macos/build_app.sh
           test -d "dist/股票分析助手.app/Contents/Frameworks/Sparkle.framework"
           test -x "dist/sparkle-tools/sign_update"
+
+      - name: 运行应用、SQLite 与 Keychain 冒烟测试
+        env:
+          TEST_KEYCHAIN: '1'
+        run: |
+          chmod +x packaging/macos/smoke_test.sh
           packaging/macos/smoke_test.sh "dist/股票分析助手.app" "0.0.0"
+
       - name: 上传测试产物
         uses: actions/upload-artifact@v4
         with:
           name: StockHelper-macOS-arm64-unsigned
           path: dist/StockHelper-0.0.0.zip
           if-no-files-found: error
+
+      - name: 清理测试 Keychain
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/stock-helper-smoke.keychain-db" >/dev/null 2>&1 || true
