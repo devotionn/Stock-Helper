@@ -48,6 +48,7 @@ def _collect_module_snapshot(conn, record_date: str, module_id: int) -> dict:
         (entry["id"],),
     ).fetchall()
     return {
+        "record_date": record_date,
         "module_id": module_id,
         "display_title": entry["display_title"] or "",
         "text_content": entry["text_content"] or "",
