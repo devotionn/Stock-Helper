@@ -40,21 +40,18 @@ jobs:
           python -m pytest tests/ -v
 
       - name: Release Secrets 预检
+        env:
+          SPARKLE_PUBLIC_KEY: ${{ secrets.SPARKLE_PUBLIC_KEY }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_CERTIFICATE_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
-          required_vars=(
-            "SPARKLE_PUBLIC_KEY=${{ secrets.SPARKLE_PUBLIC_KEY }}"
-            "SPARKLE_PRIVATE_KEY=${{ secrets.SPARKLE_PRIVATE_KEY }}"
-            "MACOS_CERTIFICATE_P12_BASE64=${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}"
-            "MACOS_CERTIFICATE_PASSWORD=${{ secrets.MACOS_CERTIFICATE_PASSWORD }}"
-            "MACOS_CERTIFICATE_NAME=${{ secrets.MACOS_CERTIFICATE_NAME }}"
-            "APPLE_ID=${{ secrets.APPLE_ID }}"
-            "APPLE_TEAM_ID=${{ secrets.APPLE_TEAM_ID }}"
-            "APPLE_APP_PASSWORD=${{ secrets.APPLE_APP_PASSWORD }}"
-          )
-          
-          for var_line in "${required_vars[@]}"; do
-            var_name="${var_line%%=*}"
-            var_value="${var_line#*=}"
+          for var_name in SPARKLE_PUBLIC_KEY SPARKLE_PRIVATE_KEY MACOS_CERTIFICATE_P12_BASE64 MACOS_CERTIFICATE_PASSWORD MACOS_CERTIFICATE_NAME APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD; do
+            var_value="${!var_name:-}"
             if [ -z "$var_value" ]; then
               echo "❌ 缺少必要配置：$var_name"
               exit 1
@@ -62,7 +59,6 @@ jobs:
               echo "✅ $var_name 已配置"
             fi
           done
-          
           echo "所有必要配置已就绪"
 
       - name: 导入 Developer ID 证书
@@ -80,7 +76,7 @@ jobs:
           
           # 导入证书
           CERT_PATH="$RUNNER_TEMP/certificate.p12"
-          echo "$MACOS_CERTIFICATE_P12_BASE64" | base64 --decode > "$CERT_PATH"
+          echo "$MACOS_CERTIFICATE_P12_BASE64" | base64 -D > "$CERT_PATH"
           security import "$CERT_PATH" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
           
           # 设置签名权限
@@ -88,6 +84,9 @@ jobs:
           
           # 添加到搜索列表
           security list-keychains -d user -s "$KEYCHAIN_PATH" "$(security list-keychains -d user | tr -d '\"')"
+          
+          # 验证证书已导入
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
           
           echo "证书导入成功"
 
@@ -111,6 +110,38 @@ jobs:
           VERSION=$APP_VERSION REQUIRE_SPARKLE=1 bash packaging/macos/build_app.sh
           # 暴露不带 v 前缀的版本号供后续步骤使用（build_app.sh 内部已去 v 前缀）
           echo "APP_VERSION_CLEAN=${APP_VERSION#v}" >> $GITHUB_ENV
+
+      - name: 冒烟测试
+        run: |
+          APP_VERSION_CLEAN="${{ github.ref_name }}"
+          APP_VERSION_CLEAN="${APP_VERSION_CLEAN#v}"
+          APP_PATH="dist/股票分析助手.app"
+          BACKEND="$APP_PATH/Contents/Resources/backend/stock-helper-server"
+          
+          echo "启动后端冒烟测试..."
+          "$BACKEND" &
+          PID=$!
+          
+          SUCCESS=0
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8765/api/health > /dev/null 2>&1; then
+              echo "✅ 后端健康检查通过"
+              SUCCESS=1
+              break
+            fi
+            sleep 1
+          done
+          
+          # 停止后端
+          kill "$PID" 2>/dev/null
+          wait "$PID" 2>/dev/null || true
+          
+          if [ "$SUCCESS" = "0" ]; then
+            echo "❌ 后端冒烟测试失败"
+            exit 1
+          fi
+          
+          echo "冒烟测试通过"
 
       - name: Sparkle EdDSA 签名
         env:

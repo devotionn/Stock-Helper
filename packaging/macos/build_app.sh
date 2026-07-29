@@ -78,6 +78,24 @@ cat > "$APP_DIR/Contents/Info.plist" << PLIST
     <true/>
     <key>SUScheduledCheckInterval</key>
     <integer>86400</integer>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+        <key>NSExceptionDomains</key>
+        <dict>
+            <key>127.0.0.1</key>
+            <dict>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key>
+                <true/>
+            </dict>
+            <key>localhost</key>
+            <dict>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key>
+                <true/>
+            </dict>
+        </dict>
+    </dict>
     <key>SUPublicEDKey</key>
     <string>${SPARKLE_PUBLIC_KEY}</string>
 </dict>
@@ -92,6 +110,17 @@ curl -L "$SPARKLE_URL" -o /tmp/sparkle.tar.xz
 mkdir -p /tmp/sparkle_extract
 tar -xf /tmp/sparkle.tar.xz -C /tmp/sparkle_extract
 cp -R /tmp/sparkle_extract/Sparkle.framework "$APP_DIR/Contents/Frameworks/"
+
+# 校验 SHA-256
+SPARKLE_SHA256="f2c5c7e1a0c45742f6b9e8a8b8e3c6d9e2f1a4b5c6d7e8f9a0b1c2d3e4f5a6b7"
+# 注意：实际SHA-256需要在首次发布时更新为真实值
+# 暂时跳过校验，打印提示
+echo "  提示：Sparkle下载完成，请在正式发布前添加SHA-256校验"
+
+if [ ! -d "$APP_DIR/Contents/Frameworks/Sparkle.framework" ]; then
+    echo "错误: Sparkle Framework 复制失败"
+    exit 1
+fi
 
 # 正式发布时要求 Sparkle 必须编译成功（REQUIRE_SPARKLE=1），开发测试允许回退
 REQUIRE_SPARKLE="${REQUIRE_SPARKLE:-0}"
@@ -153,9 +182,27 @@ if [ "$REQUIRE_SPARKLE" = "1" ]; then
 fi
 
 if [ -n "$DEVELOPER_ID" ]; then
-    echo "  对 Sparkle Framework 签名..."
-    codesign --force --deep --strict --sign "$DEVELOPER_ID" \
-        --options runtime --timestamp \
+    echo "  对 Sparkle 内部组件签名（由内向外）..."
+    SPARKLE_FW="$APP_DIR/Contents/Frameworks/Sparkle.framework/Versions/B"
+    
+    # 签名 XPC 服务
+    codesign -f -s "$DEVELOPER_ID" -o runtime \
+        "$SPARKLE_FW/XPCServices/Installer.xpc"
+    
+    codesign -f -s "$DEVELOPER_ID" -o runtime \
+        --preserve-metadata=entitlements \
+        "$SPARKLE_FW/XPCServices/Downloader.xpc"
+    
+    # 签名 Autoupdate
+    codesign -f -s "$DEVELOPER_ID" -o runtime \
+        "$SPARKLE_FW/Autoupdate"
+    
+    # 签名 Updater.app
+    codesign -f -s "$DEVELOPER_ID" -o runtime \
+        "$SPARKLE_FW/Updater.app"
+    
+    # 最后签名 Framework 本身（不用 --deep）
+    codesign -f -s "$DEVELOPER_ID" -o runtime \
         "$APP_DIR/Contents/Frameworks/Sparkle.framework"
 
     echo "  对后端二进制签名..."
@@ -169,7 +216,7 @@ if [ -n "$DEVELOPER_ID" ]; then
         "$APP_DIR/Contents/MacOS/StockHelperLauncher"
 
     echo "  对整个 .app 签名..."
-    codesign --force --deep --strict --sign "$DEVELOPER_ID" \
+    codesign --force --strict --sign "$DEVELOPER_ID" \
         --options runtime --timestamp \
         "$APP_DIR"
 

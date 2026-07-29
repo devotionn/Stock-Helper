@@ -28,6 +28,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     #endif
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // 0. 单实例检查
+        if isAlreadyRunning() {
+            openBrowser()
+            NSApp.terminate(nil)
+            return
+        }
+
         // 1. 启动后端
         launchBackend()
 
@@ -56,6 +63,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         #endif
     }
 
+    func isAlreadyRunning() -> Bool {
+        // 尝试连接已有服务
+        guard let url = URL(string: "http://127.0.0.1:8765/api/health") else { return false }
+        let semaphore = DispatchSemaphore(value: 0)
+        var running = false
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 2.0
+
+        let task = URLSession.shared.dataTask(with: request) { _, response, _ in
+            if let r = response as? HTTPURLResponse, r.statusCode == 200 {
+                running = true
+            }
+            semaphore.signal()
+        }
+        task.resume()
+        semaphore.wait()
+
+        if running {
+            // 记录日志
+            let dataDir = NSHomeDirectory() + "/Library/Application Support/Stock Helper"
+            let logDir = dataDir + "/logs"
+            appendLog("检测到已有实例运行，直接打开浏览器", toFile: logDir + "/launcher.log")
+        }
+
+        return running
+    }
+
     func launchBackend() {
         let bundlePath = Bundle.main.bundlePath
         let backendPath = bundlePath + "/Contents/Resources/backend/stock-helper-server"
@@ -79,6 +114,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         backendProcess?.arguments = []
         var env = ProcessInfo.processInfo.environment
         env["STOCK_DATA_DIR"] = dataDir
+
+        // 传递应用版本号给后端
+        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
+        env["STOCK_APP_VERSION"] = appVersion
+
         backendProcess?.environment = env
 
         // 保留旧日志：将旧的 backend.log 重命名为带时间戳的备份，仅保留最近5份
@@ -261,12 +301,36 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func quitApp() {
-        backendProcess?.terminate()
+        shutdownBackend()
         NSApp.terminate(nil)
     }
 
+    func shutdownBackend() {
+        guard let p = backendProcess, p.isRunning else { return }
+
+        let dataDir = NSHomeDirectory() + "/Library/Application Support/Stock Helper"
+        let logDir = dataDir + "/logs"
+
+        // 发送 SIGTERM
+        p.terminate()
+
+        // 等待最多 5 秒
+        let deadline = Date().addingTimeInterval(5.0)
+        while p.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+
+        // 如果仍在运行，强制结束
+        if p.isRunning {
+            kill(p.processIdentifier, SIGKILL)
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+
+        appendLog("后端进程已停止 (PID: \(p.processIdentifier))", toFile: logDir + "/launcher.log")
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
-        backendProcess?.terminate()
+        shutdownBackend()
     }
 }
 
