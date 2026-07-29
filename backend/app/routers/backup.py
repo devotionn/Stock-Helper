@@ -13,9 +13,8 @@ from pathlib import Path
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from ..config import settings
-from ..database import get_connection, get_db, init_database
+from ..database import get_connection, get_db, init_database, target_schema_version
 from ..schemas import BackupResult
-from ..time_dimension import TIME_SCHEMA_VERSION, init_time_dimension
 
 APP_VERSION = os.environ.get("STOCK_APP_VERSION", "1.0.0")
 _restore_lock = threading.Lock()
@@ -74,6 +73,11 @@ def _validate_restored_database(path: Path) -> None:
         if missing:
             raise RuntimeError(f"恢复后缺少必要数据表: {sorted(missing)}")
         conn.execute("SELECT COUNT(*) FROM module_entries").fetchone()
+        version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+        if int(version or 0) != target_schema_version():
+            raise RuntimeError(
+                f"恢复后数据库版本异常: {version}，期望 {target_schema_version()}"
+            )
     finally:
         conn.close()
 
@@ -214,12 +218,13 @@ async def restore_backup(file: UploadFile = File(...)):
             if not isinstance(manifest, dict) or "schema_version" not in manifest:
                 raise HTTPException(status_code=400, detail="manifest.json 格式无效")
             backup_schema = int(manifest.get("schema_version") or 0)
-            if backup_schema > TIME_SCHEMA_VERSION:
+            supported_schema = target_schema_version()
+            if backup_schema > supported_schema:
                 raise HTTPException(
                     status_code=409,
                     detail=(
                         f"备份数据版本 {backup_schema} 高于当前程序支持版本 "
-                        f"{TIME_SCHEMA_VERSION}，请先升级应用"
+                        f"{supported_schema}，请先升级应用"
                     ),
                 )
 
@@ -267,7 +272,6 @@ async def restore_backup(file: UploadFile = File(...)):
                     sidecar.unlink()
 
             init_database()
-            init_time_dimension()
             _validate_restored_database(settings.db_path)
         except Exception as exc:
             if db_rollback_path.exists():
@@ -280,7 +284,6 @@ async def restore_backup(file: UploadFile = File(...)):
                 shutil.move(str(assets_rollback_dir), str(settings.assets_dir))
             try:
                 init_database()
-                init_time_dimension()
             except Exception:
                 pass
             raise HTTPException(
