@@ -9,6 +9,7 @@ on:
 jobs:
   backend-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -26,6 +27,7 @@ jobs:
 
   frontend-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -42,6 +44,7 @@ jobs:
 
   macos-build:
     runs-on: macos-15
+    timeout-minutes: 30
     needs: [backend-test, frontend-test]
     steps:
       - uses: actions/checkout@v4
@@ -53,14 +56,19 @@ jobs:
           node-version: '20'
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - name: 构建无签名内部测试版
+      - name: 构建含 Sparkle 的无签名内部测试版
         env:
           VERSION: 0.0.0
           RELEASE_MODE: '0'
-          ENABLE_SPARKLE: '0'
+          ENABLE_SPARKLE: '1'
+          # 仅用于编译和 Info.plist 结构测试；正式版必须使用项目自己的真实公钥。
+          SPARKLE_PUBLIC_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+          GITHUB_API_TOKEN: ${{ github.token }}
         run: |
           chmod +x packaging/macos/build_app.sh packaging/macos/smoke_test.sh
           packaging/macos/build_app.sh
+          test -d "dist/股票分析助手.app/Contents/Frameworks/Sparkle.framework"
+          test -x "dist/sparkle-tools/sign_update"
           packaging/macos/smoke_test.sh "dist/股票分析助手.app" "0.0.0"
       - name: 上传测试产物
         uses: actions/upload-artifact@v4

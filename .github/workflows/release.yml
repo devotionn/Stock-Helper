@@ -11,6 +11,7 @@ permissions:
 jobs:
   release:
     runs-on: macos-15
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -53,7 +54,6 @@ jobs:
         env:
           SPARKLE_PUBLIC_KEY: ${{ secrets.SPARKLE_PUBLIC_KEY }}
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
-          SPARKLE_ARCHIVE_SHA256: ${{ secrets.SPARKLE_ARCHIVE_SHA256 }}
           MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           MACOS_CERTIFICATE_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
@@ -64,7 +64,7 @@ jobs:
         run: |
           set -euo pipefail
           for name in \
-            SPARKLE_PUBLIC_KEY SPARKLE_PRIVATE_KEY SPARKLE_ARCHIVE_SHA256 \
+            SPARKLE_PUBLIC_KEY SPARKLE_PRIVATE_KEY \
             MACOS_CERTIFICATE_P12_BASE64 MACOS_CERTIFICATE_PASSWORD \
             MACOS_CERTIFICATE_NAME APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD; do
             [[ -n "${!name:-}" ]] || { echo "缺少必要配置: $name"; exit 1; }
@@ -98,7 +98,7 @@ jobs:
           RELEASE_MODE: '1'
           ENABLE_SPARKLE: '1'
           SPARKLE_PUBLIC_KEY: ${{ secrets.SPARKLE_PUBLIC_KEY }}
-          SPARKLE_ARCHIVE_SHA256: ${{ secrets.SPARKLE_ARCHIVE_SHA256 }}
+          GITHUB_API_TOKEN: ${{ github.token }}
           MACOS_CERTIFICATE_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
