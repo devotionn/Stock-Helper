@@ -12,6 +12,8 @@ from ..database import get_db, get_connection, init_database
 from ..config import settings
 from ..schemas import BackupResult
 
+APP_VERSION = os.environ.get("STOCK_APP_VERSION", "1.0.0")
+
 _restore_lock = threading.Lock()
 
 router = APIRouter()
@@ -73,7 +75,7 @@ def create_backup():
 
             # 3. manifest
             manifest = {
-                "app_version": "1.0.0",
+                "app_version": APP_VERSION,
                 "schema_version": db_schema_version,
                 "created_at": datetime.now().isoformat(),
                 "file_count": file_count,

@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     # 备份配置
     max_auto_backups: int = 10
 
+    # 应用版本
+    app_version: str = os.environ.get("STOCK_APP_VERSION", "1.0.0")
+
     class Config:
         env_file = ".env"
         env_prefix = "STOCK_"

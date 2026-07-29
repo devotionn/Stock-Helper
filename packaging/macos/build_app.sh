@@ -136,6 +136,22 @@ echo "Swift 启动器编译成功"
 
 # 6a. Developer ID 签名（如果证书存在）
 DEVELOPER_ID="${MACOS_CERTIFICATE_NAME:-}"
+NOTARY_APPLE_ID="${APPLE_ID:-}"
+NOTARY_TEAM_ID="${APPLE_TEAM_ID:-}"
+NOTARY_PASSWORD="${APPLE_APP_PASSWORD:-}"
+
+# 正式模式下强制签名
+if [ "$REQUIRE_SPARKLE" = "1" ]; then
+    if [ -z "$DEVELOPER_ID" ]; then
+        echo "错误: 正式发布要求 Developer ID 证书名称"
+        exit 1
+    fi
+    if [ -z "$NOTARY_APPLE_ID" ] || [ -z "$NOTARY_TEAM_ID" ] || [ -z "$NOTARY_PASSWORD" ]; then
+        echo "错误: 正式发布要求 Apple 公证凭据"
+        exit 1
+    fi
+fi
+
 if [ -n "$DEVELOPER_ID" ]; then
     echo "  对 Sparkle Framework 签名..."
     codesign --force --deep --strict --sign "$DEVELOPER_ID" \
@@ -163,9 +179,6 @@ if [ -n "$DEVELOPER_ID" ]; then
 fi
 
 # 6b. Apple 公证（如果凭据存在）
-NOTARY_APPLE_ID="${APPLE_ID:-}"
-NOTARY_TEAM_ID="${APPLE_TEAM_ID:-}"
-NOTARY_PASSWORD="${APPLE_APP_PASSWORD:-}"
 if [ -n "$NOTARY_APPLE_ID" ] && [ -n "$NOTARY_TEAM_ID" ] && [ -n "$NOTARY_PASSWORD" ]; then
     echo "  生成公证用 ZIP..."
     NOTARY_ZIP="$DIST_DIR/notary_temp.zip"

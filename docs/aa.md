@@ -1,28 +1,30 @@
-我重新检查了最新提交 **`b50155bb`——“完成审查报告第四轮全部修复”**。这轮确实把 Swift 启动器、Sparkle 调用、健康检查、ESLint 和密钥迁移补进去了。
+我继续检查了最新提交 **`5d3398b3`——“完成审查报告第五轮全部修复”**。这轮进步很大，`package-lock.json`、Sparkle公钥、签名流程、正式Release、macOS 15 Runner、日志和诊断功能都进行了实质修改。
 
-# 结论
+# 最新结论
 
-**业务程序基本开发完成，但 macOS 正式发布和自动更新链路仍没有真正跑通。**
+**核心业务代码可以视为基本开发完成，但macOS正式发布链路仍有一个P0阻断问题，以及几个必须在首次构建前修复的问题。**
 
-当前状态更准确地说是：
+| 部分                     |                当前判断 |
+| ------------------------ | ----------------------: |
+| 12格录入、图片、组合分析 |                 90%—95% |
+| Windows端开发            |                     95% |
+| 数据库、备份、安全       |                 85%—90% |
+| macOS ARM64打包代码      |                 80%—85% |
+| Sparkle自动更新代码      |                 70%—75% |
+| Developer ID签名、公证   | 代码约60%，实际尚未验证 |
+| 可交付李叔长期使用       |                尚未达到 |
 
-| 部分                         | 状态     |
-| ---------------------------- | -------- |
-| 12格录入、图片、组合、AI分析 | 基本完成 |
-| Windows本地开发              | 基本完成 |
-| macOS arm64代码准备          | 基本完成 |
-| 生成内部测试版 `.app`        | 接近可行 |
-| Sparkle自动更新              | 尚未打通 |
-| Developer ID签名、公证       | 未实现   |
-| 可直接交付李叔长期使用       | 暂时不行 |
+现在已经不适合继续反复“补业务功能”，而应该进入：
 
-目前至少还有 **5个真实阻断问题**。
+> **构建—失败—修复—真机验收阶段。**
 
 ---
 
-# 一、当前 GitHub Actions 很可能第一步就失败
+# 这轮已经修好的内容
 
-`package.json`已经新增：
+## 1. `package-lock.json`已经同步
+
+之前`package.json`与锁文件不一致，会导致`npm ci`直接失败。现在锁文件已经包含：
 
 ```text
 eslint
@@ -30,446 +32,522 @@ eslint-plugin-vue
 vue-eslint-parser
 ```
 
-但 `package-lock.json` 根节点仍然只有：
+这个构建阻断问题已解决。
+
+## 2. Sparkle公钥支持动态写入
+
+`Info.plist`不再固定写“待生成”，而是读取：
 
 ```text
-@vitejs/plugin-vue
-vite
+SPARKLE_PUBLIC_KEY
 ```
 
-没有刚添加的三个ESLint依赖。
-
-而所有工作流和构建脚本都使用：
-
-```bash
-npm ci
-```
-
-`npm ci`要求 `package.json` 和 `package-lock.json` 严格一致，否则会直接退出，不会帮你自动更新锁文件。([npm 文档][1])
-
-## 必须先执行
-
-在Windows开发机上：
-
-```bash
-cd frontend
-npm install
-npm run lint
-npm run build
-git add package.json package-lock.json
-git commit -m "更新前端依赖锁文件"
-git push
-```
-
-这是当前最直接的构建阻断项。
-
----
-
-# 二、Sparkle公钥仍然是占位文字
-
-生成的 `Info.plist` 中目前仍然写着：
-
-```xml
-<key>SUPublicEDKey</key>
-<string>待生成</string>
-```
-
-这不是有效的EdDSA公钥。
-
-Sparkle要求旧应用和新应用中都包含与私钥配对的有效 `SUPublicEDKey`；缺少或错误的公钥会导致更新签名验证失败。([GitHub][2])
-
-所以目前即使：
-
-- 检查到了更新；
-- 下载了ZIP；
-- appcast中有签名；
-
-Sparkle也无法安全安装更新。
-
-## 正确做法
-
-生成一次Sparkle密钥对：
-
-```text
-私钥：存入 GitHub Actions Secret
-名称：SPARKLE_PRIVATE_KEY
-
-公钥：存入 GitHub Actions Secret 或 Repository Variable
-名称：SPARKLE_PUBLIC_KEY
-```
-
-构建时动态写入：
+并写入：
 
 ```xml
 <key>SUPublicEDKey</key>
 <string>${SPARKLE_PUBLIC_KEY}</string>
 ```
 
-不能保留“待生成”。
+方向正确。
 
----
+## 3. EdDSA私钥传递方式正确了
 
-# 三、当前Sparkle签名脚本实际上注入不了签名
-
-Release工作流执行：
-
-```bash
-SIGNATURE=$("$SIGN_TOOL" ... -p "$SPARKLE_PRIVATE_KEY")
-```
-
-随后判断：
-
-```bash
-grep -q "^edSignature:"
-```
-
-但Sparkle官方工具的输出格式类似：
-
-```xml
-sparkle:edSignature="一段签名" length="文件大小"
-```
-
-不是：
-
-```text
-edSignature:一段签名
-```
-
-([Sparkle][3])
-
-因此这个判断基本不会通过，最终生成的appcast仍然会保持：
-
-```xml
-sparkle:edSignature=""
-```
-
-当前生成器也明确把签名留空。
-
-而且Sparkle官方目前建议CI通过标准输入或密钥文件使用：
+现在使用：
 
 ```bash
 --ed-key-file -
 ```
 
-而不是把私钥作为命令行参数传递；命令行直接传私钥已经被标记为不安全或弃用方式。([Sparkle][4])
+通过标准输入传递私钥，不再把私钥直接放在命令行参数中。Sparkle官方也建议CI环境通过标准输入使用密钥。 ([sparkle-project.org][1])
 
-## 最佳改法
+## 4. 正式版本压缩顺序基本正确
 
-不要继续自己拼装和解析签名，直接使用Sparkle官方的：
-
-```text
-generate_appcast
-```
-
-让它自动：
-
-- 计算文件长度；
-- 生成EdDSA签名；
-- 生成正确appcast；
-- 避免手工XML错误。
-
-或者至少采用：
-
-```bash
-SIGN_OUTPUT=$(
-  printf '%s' "$SPARKLE_PRIVATE_KEY" |
-  "$SIGN_TOOL" \
-    --ed-key-file - \
-    "dist/StockHelper-${APP_VERSION_CLEAN}.zip"
-)
-```
-
-再准确提取引号中的签名值。
-
-并且必须改成：
+现在是：
 
 ```text
-没有私钥 → 发布失败
-签名失败 → 发布失败
-签名为空 → 发布失败
-找不到sign_update → 发布失败
+构建应用
+→ Developer ID签名
+→ Apple公证
+→ stapler写入票据
+→ 生成最终ZIP
+→ Sparkle签名
+→ 生成appcast
+→ 发布Release
 ```
 
-当前代码在找不到签名工具时会“跳过签名继续发布”，这不符合正式更新的安全要求。
+这个顺序比之前先压缩再签名正确得多。
+
+## 5. macOS Runner选择正确
+
+当前使用：
+
+```yaml
+runs-on: macos-15
+```
+
+GitHub当前的标准`macos-15`运行器是Apple Silicon ARM64环境，适合构建李叔的Mac mini M4版本。([GitHub Docs][2])
+
+## 6. Swift启动器更接近真实可用
+
+现在已经具备：
+
+- 启动FastAPI后端；
+
+- 写入macOS标准数据目录；
+
+- 检查服务是否正常；
+
+- 失败时显示中文错误；
+
+- 后端日志落盘；
+
+- 菜单栏图标；
+
+- 打开系统；
+
+- 检查更新；
+
+- 导出诊断信息；
+
+- 退出时停止后端。
 
 ---
 
-# 四、自动更新地址和Release类型冲突
+# 当前最严重的P0问题
 
-应用的更新地址是：
+## GitHub Runner里没有导入Developer ID证书
 
-```text
-releases/latest/download/appcast.xml
-```
+这是目前最大的实际阻断点。
 
-但Release工作流创建的是：
-
-```yaml
-draft: true
-prerelease: true
-```
-
-GitHub的“latest release”只认：
-
-- 已发布；
-- 非草稿；
-- 非预发布；
-
-的正式Release。草稿和预发布不能成为latest。([GitHub Docs][5])
-
-所以李叔电脑访问：
+Release工作流只向构建脚本传入了：
 
 ```text
-releases/latest/download/appcast.xml
+MACOS_CERTIFICATE_NAME
 ```
 
-可能拿不到刚发布的测试版本。
+构建脚本随后直接执行：
 
-## 两套更新渠道应分开
+```bash
+codesign --sign "$DEVELOPER_ID"
+```
 
-测试版：
+但是，GitHub托管的macOS Runner是每次新建的临时机器，它不会自动拥有你的Developer ID证书和私钥。GitHub官方流程要求：
+
+1. 把`.p12`证书转为Base64；
+2. 保存到GitHub Secret；
+3. 创建临时Keychain；
+4. 将证书导入Keychain；
+5. 配置Keychain访问权限；
+6. 构建完成后删除临时Keychain。([GitHub Docs][3])
+
+### 当前可能出现两种结果
+
+**没有设置`MACOS_CERTIFICATE_NAME`：**
 
 ```text
-单独的 beta-appcast.xml
-指向明确版本或测试仓库
+跳过签名
+→ 可能也跳过公证
+→ 仍然创建正式Release
 ```
 
-正式版：
+**设置了证书名称，但没有导入证书：**
+
+```text
+codesign
+→ 找不到签名身份
+→ 工作流失败
+```
+
+因此，现在的Release工作流还不能真正完成Developer ID签名。
+
+## 需要增加的Secrets
+
+建议至少配置：
+
+```text
+MACOS_CERTIFICATE_P12_BASE64
+MACOS_CERTIFICATE_PASSWORD
+KEYCHAIN_PASSWORD
+MACOS_CERTIFICATE_NAME
+
+APPLE_ID
+APPLE_TEAM_ID
+APPLE_APP_PASSWORD
+
+SPARKLE_PUBLIC_KEY
+SPARKLE_PRIVATE_KEY
+```
+
+然后在构建前增加“导入证书”步骤。
+
+---
+
+# 第二个问题：正式发布缺少Secrets预检查
+
+虽然Release标记为正式发布，但构建脚本仍然允许这些变量为空：
+
+```text
+SPARKLE_PUBLIC_KEY
+MACOS_CERTIFICATE_NAME
+APPLE_ID
+APPLE_TEAM_ID
+APPLE_APP_PASSWORD
+```
+
+例如公钥为空时，应用仍会写出：
+
+```xml
+<key>SUPublicEDKey</key>
+<string></string>
+```
+
+证书为空时跳过签名，公证凭据不完整时跳过公证。
+
+但工作流最后仍会创建一个：
 
 ```yaml
 draft: false
 prerelease: false
 ```
 
-并继续使用：
+的正式Release。
 
-```text
-releases/latest/download/appcast.xml
-```
+## 应增加Release预检
 
-不能让正式客户端依赖一个始终是草稿或预发布的Release。
-
----
-
-# 五、Developer ID签名和Apple公证仍未执行
-
-当前构建脚本最后只是打印提示：
-
-```text
-下一步：
-codesign
-notarytool
-stapler
-```
-
-并没有真正执行。
-
-Release工作流也只做了：
-
-```text
-构建
-→ Sparkle签名尝试
-→ 生成appcast
-→ 上传Release
-```
-
-没有：
-
-- 导入Developer ID证书；
-- 对Sparkle内部XPC和Framework签名；
-- 对后端二进制签名；
-- 对Swift启动器签名；
-- 对整个 `.app` 签名；
-- Hardened Runtime；
-- 时间戳；
-- `codesign --verify`；
-- Apple公证；
-- `stapler staple`；
-- `spctl`验证。
-
-Apple说明，Mac App Store以外正式分发的软件应使用Developer ID签名，并提交Apple公证，以便Gatekeeper验证来源、完整性和公证票据。([Apple Developer][6])
-
-## 当前发布出来的ZIP仍然是未签名版本
-
-而且构建脚本在签名和公证之前就已经生成ZIP：
+正式发布时，任何一项缺失都必须失败：
 
 ```bash
-ditto -c -k --keepParent ...
+required_vars=(
+  SPARKLE_PUBLIC_KEY
+  SPARKLE_PRIVATE_KEY
+  MACOS_CERTIFICATE_NAME
+  MACOS_CERTIFICATE_P12_BASE64
+  MACOS_CERTIFICATE_PASSWORD
+  APPLE_ID
+  APPLE_TEAM_ID
+  APPLE_APP_PASSWORD
+)
+
+for var in "${required_vars[@]}"; do
+  if [ -z "${!var}" ]; then
+    echo "缺少必要配置：$var"
+    exit 1
+  fi
+done
 ```
 
-正式顺序应该是：
-
-```text
-构建.app
-→ 写入Sparkle公钥
-→ 签名所有嵌套组件
-→ 签名整个.app
-→ codesign验证
-→ 生成公证ZIP
-→ notarytool提交
-→ stapler写入公证票据
-→ 再次生成最终ZIP
-→ 对最终ZIP进行Sparkle EdDSA签名
-→ 生成appcast
-→ 发布Release
-```
-
-不能先压缩，再只打印“以后签名”。
+不能默默发布一个未签名或无法自动更新的正式版本。
 
 ---
 
-# 六、Swift启动器这次已经真正参与构建
+# 第三个问题：签名注入的`sed`命令不安全
 
-这一点这次确实修好了。
+当前代码：
 
-构建脚本现在会使用 `swiftc` 编译：
-
-```text
-main.swift
-Updater.swift
+```bash
+sed -i '' \
+  "s/sparkle:edSignature=\"\"/sparkle:edSignature=\"$SIGNATURE\"/" \
+  dist/appcast.xml
 ```
 
-并链接：
+这里使用`/`作为`sed`分隔符。
+
+但Sparkle EdDSA签名是Base64字符串，可能包含：
 
 ```text
-Cocoa
+/
++
+=
+```
+
+Sparkle官方给出的签名示例中就包含`/`。([sparkle-project.org][4])
+
+一旦本次生成的签名中包含`/`，这个`sed`表达式就可能解析失败。
+
+## 最低限度修正
+
+改用Base64不会包含的分隔符：
+
+```bash
+sed -i '' \
+  "s|sparkle:edSignature=\"\"|sparkle:edSignature=\"$SIGNATURE\"|" \
+  dist/appcast.xml
+```
+
+## 更佳做法
+
+不要先生成空签名再用`sed`修改，而是让：
+
+```text
+generate_appcast.py
+```
+
+直接接收签名参数。
+
+最好进一步使用Sparkle官方的`generate_appcast`工具。Sparkle官方明确推荐使用它自动生成签名和appcast，而不是手工拼接XML。([sparkle-project.org][5])
+
+---
+
+# 第四个问题：当前签名、公证是“可选步骤”
+
+虽然注释写着正式发布，但代码逻辑是：
+
+```bash
+if [ -n "$DEVELOPER_ID" ]; then
+    执行签名
+fi
+```
+
+以及：
+
+```bash
+if Apple凭据完整; then
+    执行公证
+fi
+```
+
+正式Release不应该采用“有就签、没有就算了”的设计。
+
+建议区分：
+
+```text
+开发构建：
+允许不签名、不公证
+
+正式Release：
+必须签名、必须公证、必须Sparkle签名
+任何一步失败立即终止
+```
+
+例如增加：
+
+```text
+RELEASE_MODE=1
+```
+
+在正式模式下强制检查全部配置和结果。
+
+---
+
+# 第五个问题：签名嵌套组件还需要真实公证验证
+
+当前签名逻辑包括：
+
+```text
 Sparkle.framework
+后端主二进制
+Swift启动器
+整个.app
 ```
 
-`main.swift`也已经实际创建：
+但PyInstaller的`onedir`目录中还可能包含：
 
-- 后端子进程；
+- Python动态库；
+- 第三方`.dylib`；
+- 扩展模块；
+- Keyring相关组件；
+- Pillow相关二进制；
+- Sparkle内部Helper/XPC组件。
 
-- 数据目录；
+目前主要依赖：
 
-- 服务健康检查；
-
-- 浏览器启动；
-
-- 菜单栏图标；
-
-- 检查更新；
-
-- 退出应用；
-
-- Sparkle更新控制器。
-
-这是实质性进展。
-
-但目前构建脚本有一个不适合正式版的逻辑：
-
-```text
-Sparkle编译失败
-→ 自动退回不带Sparkle的版本
-→ 继续认为构建成功
+```bash
+codesign --deep
 ```
 
-既然项目明确要求自动更新，正式Release时应当：
+递归处理。
 
-```text
-Sparkle编译失败
-→ 整个构建失败
-```
+这不一定必然失败，但**必须通过真实的`notarytool`返回结果才能确认**。Sparkle官方也建议应用本体使用Developer ID签名并完成Apple公证。([sparkle-project.org][5])
 
-不能悄悄生成一个没有更新功能的客户端。
-
-开发测试版可以允许回退，正式发布版不允许。
+首次公证失败后，需要根据Apple返回的JSON日志，定位具体哪个嵌套Mach-O文件未正确签名，再改成由内向外逐个签名。
 
 ---
 
-# 七、macOS运行器需要开始迁移
+# Swift启动器还有几个P1问题
 
-工作流目前使用：
+## 1. `launcher.log`每次写入都在覆盖
 
-```yaml
-runs-on: macos-14
+当前启动时写：
+
+```swift
+"启动股票分析助手..."
 ```
 
-目前GitHub的 `macos-14` 是arm64环境，架构与李叔的M4相符；但macOS 14运行器已从2026年7月开始进入弃用周期，计划在2026年11月停止支持。GitHub当前提供 `macos-15` 和更新的arm64运行器。([GitHub][7])
+后端启动后又写：
 
-建议现在直接改成：
-
-```yaml
-runs-on: macos-15
+```swift
+"后端进程已启动"
 ```
 
-目标设备是Mac mini M4，本身不需要兼容很老的macOS。
+但两次都使用：
+
+```swift
+write(toFile:atomically:true)
+```
+
+第二次会覆盖第一次，并不是追加。
+
+应写一个追加日志函数，否则诊断文件里往往只能看到最后一条。
+
+## 2. 后端日志每次启动都会被清空
+
+```swift
+logFile.truncateFile(atOffset: 0)
+```
+
+如果李叔第一次启动失败，第二次重新打开时旧错误日志就会被清除。
+
+建议采用：
+
+```text
+backend-current.log
+backend-20260730-013100.log
+```
+
+或者保留最近5份日志。
+
+## 3. 后端检查请求没有明确超时
+
+当前使用信号量等待`URLSession`完成：
+
+```swift
+semaphore.wait()
+```
+
+但请求没有设置约1秒的`timeoutInterval`。
+
+正常情况下localhost连接失败会很快返回，但如果连接建立后无响应，等待时间可能超过预期，所谓“最多30秒”并不能严格保证。
+
+## 4. “导出诊断信息”只打开文件夹
+
+诊断报告写到：
+
+```text
+diagnostic_report.txt
+```
+
+但最后调用：
+
+```swift
+selectFile(nil, inFileViewerRootedAtPath: dataDir)
+```
+
+Finder只会打开数据目录，不会自动选中诊断文件。
+
+应改成选中：
+
+```text
+diagPath
+```
+
+让李叔一眼看到应该发送哪个文件。
 
 ---
 
-# 八、还有两个不阻断测试、但交付前要处理的问题
+# 工程流程还可以简化
 
-## 1. 后端启动失败仍会打开浏览器
+Tag推送后，现在会同时执行：
 
-Swift启动器等待30秒后，即使后端始终没有启动成功，也会继续打开浏览器。
+- `ci.yml`中的后端测试、前端检查、macOS构建；
+- `release.yml`中的前端构建、后端测试、macOS构建和发布。
 
-应改成：
+并且`ci.yml`先执行一次PyInstaller，然后`build_app.sh`内部又执行一次PyInstaller。
 
-```text
-后端成功 → 打开浏览器
+不会直接造成错误，但会：
 
-后端失败 → 显示：
-“股票分析助手启动失败，请重新打开；如仍失败，请联系维护人员。”
-```
+- 重复消耗macOS Runner时间；
+- 延长发布；
+- 产生两套构建结果；
+- 增加排查难度。
 
-不能给李叔打开一个无法访问的空白页面。
-
-## 2. 后端日志没有可靠落盘
-
-Swift启动的后端进程没有把标准输出、错误输出重定向到：
-
-```text
-~/Library/Application Support/Stock Helper/logs/
-```
-
-一旦李叔电脑启动失败，你远程排查时可能没有足够日志。
-
-至少需要：
-
-```text
-launcher.log
-backend.log
-update.log
-```
-
-并在菜单中提供：
-
-```text
-导出诊断信息
-```
+建议Release只依赖一条经过测试的产物链，不要重复构建两次。
 
 ---
 
-# 最终评价
+# 版本信息仍未完全统一
 
-这轮以后，准确状态是：
+应用的`Info.plist`版本会根据Tag变化，这已经正确。
 
-> **核心业务程序已经基本开发完成，Swift原生启动器也已经真正进入构建；但当前仓库仍不能生成一个具备可靠自动更新、Developer ID签名和Apple公证的正式交付版本。**
+但备份文件中的：
 
-现在先不要继续反复让AI宣称“全部完成”，直接按验收结果推进：
-
-```text
-1. 更新并提交 package-lock.json
-2. 生成Sparkle公私钥
-3. 动态写入SUPublicEDKey
-4. 修复sign_update调用与签名提取
-5. 签名失败时终止发布
-6. 修复latest与draft/prerelease冲突
-7. 加入Developer ID签名和Apple公证
-8. 将Runner改为macos-15
-9. 推送测试Tag v0.1.0
-10. 确认GitHub Actions全部绿色
-11. 下载arm64 .app到M芯片Mac
-12. 完成首次安装、Keychain、备份和退出测试
-13. 再发布v0.1.1测试自动更新
+```json
+"app_version": "1.0.0"
 ```
 
-完成 `v0.1.0 → v0.1.1` 的真机升级，并确认文字、图片、历史记录全部保留以后，才可以认定这套程序真正具备交付条件。
+仍然写死。
 
-[1]: https://docs.npmjs.com/cli/v10/commands/npm-ci/?utm_source=chatgpt.com "npm-ci | npm Docs"
-[2]: https://github.com/sparkle-project/Sparkle/discussions/2597?utm_source=chatgpt.com "Help signing a `.dmg` with EdDSA key. · sparkle-project Sparkle · Discussion #2597 · GitHub"
-[3]: https://sparkle-project.org/documentation/publishing/?utm_source=chatgpt.com "Publishing an update - Sparkle: open source software update framework for macOS"
-[4]: https://sparkle-project.org/documentation/upgrading/?utm_source=chatgpt.com "Upgrading from previous versions of Sparkle - Sparkle: open source software update framework for macOS"
-[5]: https://docs.github.com/en/rest/releases/releases?utm_source=chatgpt.com "REST API endpoints for releases - GitHub Docs"
-[6]: https://developer.apple.com/developer-id/?utm_source=chatgpt.com "Signing Mac Software with Developer ID - Apple Developer"
-[7]: https://github.com/actions/runner-images/releases?utm_source=chatgpt.com "Releases · actions/runner-images · GitHub"
+例如程序升级到`1.2.0`后，备份manifest仍然声称来自`1.0.0`。
+
+建议建立一个统一版本来源：
+
+```text
+STOCK_APP_VERSION
+```
+
+并同时用于：
+
+- Info.plist；
+- FastAPI版本；
+- 备份manifest；
+- 诊断信息；
+- 日志；
+- 更新记录。
+
+---
+
+# 现在能不能说“开发好了”
+
+可以说：
+
+> **业务功能已经开发完成，macOS构建和更新代码也基本齐全。**
+
+不能说：
+
+> **已经完成正式交付。**
+
+因为目前还缺少最关键的客观证据：
+
+```text
+GitHub Actions成功构建
+Developer ID签名成功
+Apple公证成功
+Sparkle签名成功
+M芯片Mac成功启动
+v0.1.0成功升级到v0.1.1
+用户数据全部保留
+```
+
+代码审查只能证明“写了这些逻辑”，不能证明GitHub Runner、Apple公证服务和真实Mac都已经接受这套逻辑。
+
+# 现在应立即做的事情
+
+先不要继续增加功能，按以下顺序验收：
+
+```text
+1. 导入Developer ID证书到GitHub Runner
+2. 增加全部Release Secrets预检
+3. 修复sed签名注入
+4. 推送测试标签 v0.1.0
+5. 检查GitHub Actions是否全部绿色
+6. 下载最终ZIP
+7. 在M芯片Mac执行：
+   codesign --verify
+   spctl --assess
+   stapler validate
+8. 双击启动应用
+9. 测试Keychain、图片上传、AI分析、备份恢复
+10. 发布v0.1.1
+11. 用v0.1.0执行Sparkle自动更新
+12. 确认数据库、图片和历史记录完全保留
+```
+
+完成第12步以后，才可以认定：
+
+> **股票分析助手已经具备正式交付给李叔的条件。**
+
+[1]: https://sparkle-project.org/documentation/security-and-reliability/?utm_source=chatgpt.com "Update Improvements - Sparkle: open source software update framework for macOS"
+[2]: https://docs.github.com/en/actions/reference/runners/github-hosted-runners?utm_source=chatgpt.com "GitHub-hosted runners reference - GitHub Docs"
+[3]: https://docs.github.com/en/actions/how-tos/deploy/deploy-to-third-party-platforms/sign-xcode-applications?source=post_page-----51088aa5852c---------------------------------------&utm_source=chatgpt.com "Installing an Apple certificate on macOS runners for Xcode development - GitHub Docs"
+[4]: https://sparkle-project.org/documentation/publishing/?utm_source=chatgpt.com "Publishing an update - Sparkle: open source software update framework for macOS"
+[5]: https://sparkle-project.org/documentation/?utm_source=chatgpt.com "Documentation - Sparkle: open source software update framework for macOS"

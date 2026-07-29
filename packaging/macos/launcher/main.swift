@@ -5,6 +5,21 @@ import Foundation
 import Sparkle
 #endif
 
+func appendLog(_ message: String, toFile path: String) {
+    let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .short, timeStyle: .medium)
+    let line = "[\(timestamp)] \(message)\n"
+    if let handle = FileHandle(forWritingAtPath: path) {
+        handle.seekToEndOfFile()
+        if let data = line.data(using: .utf8) {
+            handle.write(data)
+        }
+        handle.closeFile()
+    } else {
+        // 文件不存在，创建
+        try? line.write(toFile: path, atomically: true, encoding: .utf8)
+    }
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate {
     var backendProcess: Process?
     var statusBar: NSStatusItem?
@@ -57,8 +72,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let launcherLogPath = logDir + "/launcher.log"
 
         // 记录启动器日志
-        let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .short, timeStyle: .medium)
-        try? "[\(timestamp)] 启动股票分析助手...\n".write(toFile: launcherLogPath, atomically: true, encoding: .utf8)
+        appendLog("启动股票分析助手...", toFile: launcherLogPath)
 
         backendProcess = Process()
         backendProcess?.executableURL = URL(fileURLWithPath: backendPath)
@@ -67,20 +81,40 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         env["STOCK_DATA_DIR"] = dataDir
         backendProcess?.environment = env
 
+        // 保留旧日志：将旧的 backend.log 重命名为带时间戳的备份，仅保留最近5份
+        if fm.fileExists(atPath: logPath) {
+            let oldTimestamp = DateFormatter()
+            oldTimestamp.dateFormat = "yyyyMMdd-HHmmss"
+            let backupPath = logDir + "/backend-\(oldTimestamp.string(from: Date())).log"
+            try? fm.moveItem(atPath: logPath, toPath: backupPath)
+
+            // 清理超过5份的旧日志
+            if let logs = try? fm.contentsOfDirectory(atPath: logDir) {
+                let oldLogs = logs.filter { $0.hasPrefix("backend-") && $0.hasSuffix(".log") }
+                    .sorted().reversed()
+                for oldLog in oldLogs.dropFirst(4) {
+                    try? fm.removeItem(atPath: logDir + "/" + oldLog)
+                }
+            }
+        }
+
+        // 确保日志文件存在，以便 FileHandle 可打开
+        if !fm.fileExists(atPath: logPath) {
+            fm.createFile(atPath: logPath, contents: nil)
+        }
+
         // 重定向 stdout/stderr 到日志文件
         let logFile = FileHandle(forWritingAtPath: logPath)
         if let logFile = logFile {
-            // 清空旧日志
-            logFile.truncateFile(atOffset: 0)
             backendProcess?.standardOutput = logFile
             backendProcess?.standardError = logFile
         }
 
         do {
             try backendProcess?.run()
-            try? "[\(timestamp)] 后端进程已启动\n".write(toFile: launcherLogPath, atomically: true, encoding: .utf8)
+            appendLog("后端进程已启动", toFile: launcherLogPath)
         } catch {
-            try? "[\(timestamp)] 后端启动失败: \(error.localizedDescription)\n".write(toFile: launcherLogPath, atomically: true, encoding: .utf8)
+            appendLog("后端启动失败: \(error.localizedDescription)", toFile: launcherLogPath)
             let alert = NSAlert()
             alert.messageText = "启动失败"
             alert.informativeText = "无法启动后端服务: \(error.localizedDescription)\n\n请重新打开应用；如仍失败，请联系维护人员。"
@@ -97,7 +131,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let semaphore = DispatchSemaphore(value: 0)
             var token: String?
 
-            let task = URLSession.shared.dataTask(with: sessionURL) { data, response, _ in
+            var sessionRequest = URLRequest(url: sessionURL)
+            sessionRequest.timeoutInterval = 3.0
+            let task = URLSession.shared.dataTask(with: sessionRequest) { data, response, _ in
                 if let r = response as? HTTPURLResponse, r.statusCode == 200,
                    let data = data,
                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -115,6 +151,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 var healthRequest = URLRequest(url: healthURL)
                 healthRequest.setValue(token, forHTTPHeaderField: "X-Session-Token")
                 healthRequest.setValue("127.0.0.1:8765", forHTTPHeaderField: "Host")
+                healthRequest.timeoutInterval = 3.0
 
                 let healthSem = DispatchSemaphore(value: 0)
                 var success = false
@@ -220,7 +257,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         try? report.write(toFile: diagPath, atomically: true, encoding: .utf8)
 
         // 在 Finder 中显示
-        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: dataDir)
+        NSWorkspace.shared.selectFile(diagPath, inFileViewerRootedAtPath: dataDir)
     }
 
     @objc func quitApp() {
