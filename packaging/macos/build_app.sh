@@ -1,265 +1,170 @@
 #!/bin/bash
-# 构建 macOS .app
-# 在 GitHub Actions macOS runner 或本地 M 系列 Mac 上执行
-set -e
+# 构建、签名并公证 macOS Apple Silicon 应用。
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BUILD_DIR="$PROJECT_ROOT/build"
 DIST_DIR="$PROJECT_ROOT/dist"
-
-echo "=== 股票分析助手 macOS 构建 ==="
-
-# 版本号：优先使用环境变量 VERSION（由 CI 从 tag 传入），否则默认 1.0.0
 APP_VERSION="${VERSION:-1.0.0}"
-# 去掉可能的 v 前缀
 APP_VERSION="${APP_VERSION#v}"
-echo "版本号: $APP_VERSION"
-
-# Sparkle 公钥（写入 Info.plist 的 SUPublicEDKey），从环境变量读取，允许为空
+APP_DIR="$DIST_DIR/股票分析助手.app"
+ENABLE_SPARKLE="${ENABLE_SPARKLE:-1}"
+RELEASE_MODE="${RELEASE_MODE:-0}"
+SPARKLE_VERSION="${SPARKLE_VERSION:-2.9.2}"
 SPARKLE_PUBLIC_KEY="${SPARKLE_PUBLIC_KEY:-}"
+SPARKLE_ARCHIVE_SHA256="${SPARKLE_ARCHIVE_SHA256:-}"
+SPARKLE_TEMP="$(mktemp -d "${RUNNER_TEMP:-/tmp}/stock-helper-sparkle.XXXXXX")"
 
-# 1. 构建前端
-echo "[1/7] 构建前端..."
+cleanup() {
+  rm -rf "$SPARKLE_TEMP"
+}
+trap cleanup EXIT
+
+if [[ ! "$APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "错误: VERSION 必须是 x.y.z 格式，当前值: $APP_VERSION"
+  exit 1
+fi
+
+if [[ "$RELEASE_MODE" == "1" ]]; then
+  ENABLE_SPARKLE=1
+  for required_name in SPARKLE_PUBLIC_KEY SPARKLE_ARCHIVE_SHA256 MACOS_CERTIFICATE_NAME APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD; do
+    if [[ -z "${!required_name:-}" ]]; then
+      echo "错误: 正式发布缺少 $required_name"
+      exit 1
+    fi
+  done
+fi
+
+echo "=== 股票分析助手 macOS 构建 v$APP_VERSION ==="
+rm -rf "$BUILD_DIR" "$DIST_DIR"
+mkdir -p "$BUILD_DIR" "$DIST_DIR"
+
 cd "$PROJECT_ROOT/frontend"
 npm ci
+npm run lint
 npm run build
 
-# 2. 安装后端依赖
-echo "[2/7] 安装后端依赖..."
 cd "$PROJECT_ROOT/backend"
 pip install -r requirements.txt -r requirements-dev.txt
-
-# 3. PyInstaller 打包后端
-echo "[3/7] PyInstaller 打包..."
 cd "$PROJECT_ROOT"
-pyinstaller packaging/macos/stock-helper.spec --noconfirm --distpath "$DIST_DIR" --workpath "$BUILD_DIR"
+pyinstaller packaging/macos/stock-helper.spec \
+  --noconfirm --clean --distpath "$DIST_DIR" --workpath "$BUILD_DIR"
 
-# 4. 组装 .app
-echo "[4/7] 组装 .app..."
-APP_DIR="$DIST_DIR/股票分析助手.app"
-rm -rf "$APP_DIR"
-mkdir -p "$APP_DIR/Contents/MacOS"
-mkdir -p "$APP_DIR/Contents/Resources"
-mkdir -p "$APP_DIR/Contents/Frameworks"
+mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" "$APP_DIR/Contents/Frameworks"
+cp -R "$DIST_DIR/stock-helper-server" "$APP_DIR/Contents/Resources/backend"
 
-# 复制后端
-cp -r "$DIST_DIR/stock-helper-server" "$APP_DIR/Contents/Resources/backend"
-
-# 创建 Info.plist
-cat > "$APP_DIR/Contents/Info.plist" << PLIST
+cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key>
-    <string>股票分析助手</string>
-    <key>CFBundleDisplayName</key>
-    <string>股票分析助手</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.stockhelper.app</string>
-    <key>CFBundleVersion</key>
-    <string>${APP_VERSION}</string>
-    <key>CFBundleShortVersionString</key>
-    <string>${APP_VERSION}</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleExecutable</key>
-    <string>StockHelperLauncher</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>12.0</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSSupportsAutomaticGraphicsSwitching</key>
-    <true/>
-    <key>SUFeedURL</key>
-    <string>https://github.com/devotionn/Stock-Helper/releases/latest/download/appcast.xml</string>
-    <key>SUEnableAutomaticChecks</key>
-    <true/>
-    <key>SUScheduledCheckInterval</key>
-    <integer>86400</integer>
-    <key>NSAppTransportSecurity</key>
+  <key>CFBundleName</key><string>股票分析助手</string>
+  <key>CFBundleDisplayName</key><string>股票分析助手</string>
+  <key>CFBundleIdentifier</key><string>com.stockhelper.app</string>
+  <key>CFBundleVersion</key><string>${APP_VERSION}</string>
+  <key>CFBundleShortVersionString</key><string>${APP_VERSION}</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleExecutable</key><string>StockHelperLauncher</string>
+  <key>LSMinimumSystemVersion</key><string>12.0</string>
+  <key>LSUIElement</key><true/>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsLocalNetworking</key><true/>
+    <key>NSExceptionDomains</key>
     <dict>
-        <key>NSAllowsLocalNetworking</key>
-        <true/>
-        <key>NSExceptionDomains</key>
-        <dict>
-            <key>127.0.0.1</key>
-            <dict>
-                <key>NSExceptionAllowsInsecureHTTPLoads</key>
-                <true/>
-            </dict>
-            <key>localhost</key>
-            <dict>
-                <key>NSExceptionAllowsInsecureHTTPLoads</key>
-                <true/>
-            </dict>
-        </dict>
+      <key>127.0.0.1</key>
+      <dict><key>NSExceptionAllowsInsecureHTTPLoads</key><true/></dict>
+      <key>localhost</key>
+      <dict><key>NSExceptionAllowsInsecureHTTPLoads</key><true/></dict>
     </dict>
-    <key>SUPublicEDKey</key>
-    <string>${SPARKLE_PUBLIC_KEY}</string>
+  </dict>
 </dict>
 </plist>
 PLIST
 
-# 下载 Sparkle Framework（编译启动器前需要，canImport(Sparkle) 在编译期检查）
-echo "下载 Sparkle Framework..."
-SPARKLE_VERSION="2.6.4"
-SPARKLE_URL="https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VERSION}/Sparkle-${SPARKLE_VERSION}.tar.xz"
-curl -L "$SPARKLE_URL" -o /tmp/sparkle.tar.xz
-mkdir -p /tmp/sparkle_extract
-tar -xf /tmp/sparkle.tar.xz -C /tmp/sparkle_extract
-cp -R /tmp/sparkle_extract/Sparkle.framework "$APP_DIR/Contents/Frameworks/"
+if [[ "$ENABLE_SPARKLE" == "1" ]]; then
+  [[ -n "$SPARKLE_PUBLIC_KEY" ]] || { echo "错误: 启用 Sparkle 时必须提供 SPARKLE_PUBLIC_KEY"; exit 1; }
+  [[ -n "$SPARKLE_ARCHIVE_SHA256" ]] || { echo "错误: 启用 Sparkle 时必须提供 SPARKLE_ARCHIVE_SHA256"; exit 1; }
 
-# 校验 SHA-256
-SPARKLE_SHA256="f2c5c7e1a0c45742f6b9e8a8b8e3c6d9e2f1a4b5c6d7e8f9a0b1c2d3e4f5a6b7"
-# 注意：实际SHA-256需要在首次发布时更新为真实值
-# 暂时跳过校验，打印提示
-echo "  提示：Sparkle下载完成，请在正式发布前添加SHA-256校验"
+  SPARKLE_ARCHIVE="$SPARKLE_TEMP/Sparkle-${SPARKLE_VERSION}.tar.xz"
+  SPARKLE_URL="https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VERSION}/Sparkle-${SPARKLE_VERSION}.tar.xz"
+  curl --fail --location --retry 3 --retry-delay 2 "$SPARKLE_URL" -o "$SPARKLE_ARCHIVE"
+  echo "${SPARKLE_ARCHIVE_SHA256}  ${SPARKLE_ARCHIVE}" | shasum -a 256 -c -
+  tar -xf "$SPARKLE_ARCHIVE" -C "$SPARKLE_TEMP"
+  SPARKLE_FRAMEWORK="$(find "$SPARKLE_TEMP" -maxdepth 3 -name Sparkle.framework -type d | head -1)"
+  [[ -n "$SPARKLE_FRAMEWORK" ]] || { echo "错误: Sparkle.framework 未找到"; exit 1; }
+  cp -R "$SPARKLE_FRAMEWORK" "$APP_DIR/Contents/Frameworks/"
 
-if [ ! -d "$APP_DIR/Contents/Frameworks/Sparkle.framework" ]; then
-    echo "错误: Sparkle Framework 复制失败"
-    exit 1
+  /usr/libexec/PlistBuddy -c "Add :SUFeedURL string https://github.com/devotionn/Stock-Helper/releases/latest/download/appcast.xml" "$APP_DIR/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Add :SUEnableAutomaticChecks bool true" "$APP_DIR/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Add :SUScheduledCheckInterval integer 86400" "$APP_DIR/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Add :SUPublicEDKey string $SPARKLE_PUBLIC_KEY" "$APP_DIR/Contents/Info.plist"
+
+  mkdir -p "$DIST_DIR/sparkle-tools"
+  SIGN_TOOL="$(find "$SPARKLE_TEMP" -name sign_update -type f | head -1)"
+  [[ -n "$SIGN_TOOL" ]] || { echo "错误: sign_update 未找到"; exit 1; }
+  cp "$SIGN_TOOL" "$DIST_DIR/sparkle-tools/sign_update"
+  chmod +x "$DIST_DIR/sparkle-tools/sign_update"
 fi
 
-# 正式发布时要求 Sparkle 必须编译成功（REQUIRE_SPARKLE=1），开发测试允许回退
-REQUIRE_SPARKLE="${REQUIRE_SPARKLE:-0}"
-
-# 5. 编译 Swift 启动器
-echo "[5/7] 编译 Swift 启动器..."
 LAUNCHER_DIR="$PROJECT_ROOT/packaging/macos/launcher"
-
-# 先尝试带 Sparkle 编译，失败则不带 Sparkle 编译
-if [ -d "$APP_DIR/Contents/Frameworks/Sparkle.framework" ]; then
-    swiftc \
-        "$LAUNCHER_DIR/main.swift" \
-        "$LAUNCHER_DIR/Updater.swift" \
-        -framework Cocoa \
-        -F "$APP_DIR/Contents/Frameworks" \
-        -framework Sparkle \
-        -Xlinker -rpath \
-        -Xlinker "@executable_path/../Frameworks" \
-        -o "$APP_DIR/Contents/MacOS/StockHelperLauncher" 2>/dev/null || {
-        if [ "$REQUIRE_SPARKLE" = "1" ]; then
-            echo "错误: Sparkle 编译失败，正式发布不允许跳过"
-            exit 1
-        fi
-        echo "Sparkle 编译失败，回退到不带 Sparkle 的版本..."
-        swiftc \
-            "$LAUNCHER_DIR/main.swift" \
-            -framework Cocoa \
-            -o "$APP_DIR/Contents/MacOS/StockHelperLauncher"
-    }
+if [[ "$ENABLE_SPARKLE" == "1" ]]; then
+  swiftc "$LAUNCHER_DIR/main.swift" "$LAUNCHER_DIR/Updater.swift" \
+    -framework Cocoa \
+    -F "$APP_DIR/Contents/Frameworks" -framework Sparkle \
+    -Xlinker -rpath -Xlinker "@executable_path/../Frameworks" \
+    -o "$APP_DIR/Contents/MacOS/StockHelperLauncher"
 else
-    swiftc \
-        "$LAUNCHER_DIR/main.swift" \
-        -framework Cocoa \
-        -o "$APP_DIR/Contents/MacOS/StockHelperLauncher"
+  swiftc "$LAUNCHER_DIR/main.swift" -framework Cocoa \
+    -o "$APP_DIR/Contents/MacOS/StockHelperLauncher"
 fi
+chmod +x "$APP_DIR/Contents/MacOS/StockHelperLauncher"
+plutil -lint "$APP_DIR/Contents/Info.plist"
 
-if [ ! -f "$APP_DIR/Contents/MacOS/StockHelperLauncher" ]; then
-    echo "错误: Swift 启动器编译失败"
-    exit 1
-fi
-echo "Swift 启动器编译成功"
-
-# 6a. Developer ID 签名（如果证书存在）
 DEVELOPER_ID="${MACOS_CERTIFICATE_NAME:-}"
-NOTARY_APPLE_ID="${APPLE_ID:-}"
-NOTARY_TEAM_ID="${APPLE_TEAM_ID:-}"
-NOTARY_PASSWORD="${APPLE_APP_PASSWORD:-}"
+if [[ -n "$DEVELOPER_ID" ]]; then
+  if [[ "$ENABLE_SPARKLE" == "1" ]]; then
+    SPARKLE_CURRENT="$APP_DIR/Contents/Frameworks/Sparkle.framework/Versions/Current"
+    [[ -e "$SPARKLE_CURRENT" ]] || { echo "错误: Sparkle Versions/Current 不存在"; exit 1; }
+    codesign --force --sign "$DEVELOPER_ID" --options runtime --timestamp "$SPARKLE_CURRENT/XPCServices/Installer.xpc"
+    codesign --force --sign "$DEVELOPER_ID" --options runtime --timestamp --preserve-metadata=entitlements "$SPARKLE_CURRENT/XPCServices/Downloader.xpc"
+    codesign --force --sign "$DEVELOPER_ID" --options runtime --timestamp "$SPARKLE_CURRENT/Autoupdate"
+    codesign --force --sign "$DEVELOPER_ID" --options runtime --timestamp "$SPARKLE_CURRENT/Updater.app"
+    codesign --force --sign "$DEVELOPER_ID" --options runtime --timestamp "$APP_DIR/Contents/Frameworks/Sparkle.framework"
+  fi
 
-# 正式模式下强制签名
-if [ "$REQUIRE_SPARKLE" = "1" ]; then
-    if [ -z "$DEVELOPER_ID" ]; then
-        echo "错误: 正式发布要求 Developer ID 证书名称"
-        exit 1
+  BACKEND_DIR="$APP_DIR/Contents/Resources/backend"
+  while IFS= read -r -d '' binary; do
+    if file "$binary" | grep -q 'Mach-O'; then
+      codesign --force --sign "$DEVELOPER_ID" --options runtime --timestamp "$binary"
     fi
-    if [ -z "$NOTARY_APPLE_ID" ] || [ -z "$NOTARY_TEAM_ID" ] || [ -z "$NOTARY_PASSWORD" ]; then
-        echo "错误: 正式发布要求 Apple 公证凭据"
-        exit 1
-    fi
+  done < <(find "$BACKEND_DIR" -type f -print0)
+
+  codesign --force --sign "$DEVELOPER_ID" --options runtime --timestamp "$APP_DIR/Contents/MacOS/StockHelperLauncher"
+  codesign --force --sign "$DEVELOPER_ID" --options runtime --timestamp "$APP_DIR"
+  codesign --verify --deep --strict --verbose=2 "$APP_DIR"
+elif [[ "$RELEASE_MODE" == "1" ]]; then
+  echo "错误: 正式发布没有 Developer ID"
+  exit 1
 fi
 
-if [ -n "$DEVELOPER_ID" ]; then
-    echo "  对 Sparkle 内部组件签名（由内向外）..."
-    SPARKLE_FW="$APP_DIR/Contents/Frameworks/Sparkle.framework/Versions/B"
-    
-    # 签名 XPC 服务
-    codesign -f -s "$DEVELOPER_ID" -o runtime \
-        "$SPARKLE_FW/XPCServices/Installer.xpc"
-    
-    codesign -f -s "$DEVELOPER_ID" -o runtime \
-        --preserve-metadata=entitlements \
-        "$SPARKLE_FW/XPCServices/Downloader.xpc"
-    
-    # 签名 Autoupdate
-    codesign -f -s "$DEVELOPER_ID" -o runtime \
-        "$SPARKLE_FW/Autoupdate"
-    
-    # 签名 Updater.app
-    codesign -f -s "$DEVELOPER_ID" -o runtime \
-        "$SPARKLE_FW/Updater.app"
-    
-    # 最后签名 Framework 本身（不用 --deep）
-    codesign -f -s "$DEVELOPER_ID" -o runtime \
-        "$APP_DIR/Contents/Frameworks/Sparkle.framework"
-
-    echo "  对后端二进制签名..."
-    codesign --force --sign "$DEVELOPER_ID" \
-        --options runtime --timestamp \
-        "$APP_DIR/Contents/Resources/backend/stock-helper-server"
-
-    echo "  对 Swift 启动器签名..."
-    codesign --force --sign "$DEVELOPER_ID" \
-        --options runtime --timestamp \
-        "$APP_DIR/Contents/MacOS/StockHelperLauncher"
-
-    echo "  对整个 .app 签名..."
-    codesign --force --strict --sign "$DEVELOPER_ID" \
-        --options runtime --timestamp \
-        "$APP_DIR"
-
-    echo "  验证签名..."
-    codesign --verify --deep --strict --verbose=2 "$APP_DIR"
-    echo "  签名验证通过"
+if [[ "$RELEASE_MODE" == "1" ]]; then
+  NOTARY_ZIP="$DIST_DIR/notary-${APP_VERSION}.zip"
+  ditto -c -k --keepParent "$APP_DIR" "$NOTARY_ZIP"
+  xcrun notarytool submit "$NOTARY_ZIP" \
+    --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+    --password "$APPLE_APP_PASSWORD" --wait
+  xcrun stapler staple "$APP_DIR"
+  xcrun stapler validate "$APP_DIR"
+  spctl --assess --type execute --verbose=2 "$APP_DIR"
+  rm -f "$NOTARY_ZIP"
 fi
 
-# 6b. Apple 公证（如果凭据存在）
-if [ -n "$NOTARY_APPLE_ID" ] && [ -n "$NOTARY_TEAM_ID" ] && [ -n "$NOTARY_PASSWORD" ]; then
-    echo "  生成公证用 ZIP..."
-    NOTARY_ZIP="$DIST_DIR/notary_temp.zip"
-    ditto -c -k --keepParent "$APP_DIR" "$NOTARY_ZIP"
-
-    echo "  提交 Apple 公证..."
-    xcrun notarytool submit "$NOTARY_ZIP" \
-        --apple-id "$NOTARY_APPLE_ID" \
-        --team-id "$NOTARY_TEAM_ID" \
-        --password "$NOTARY_PASSWORD" \
-        --wait
-
-    echo "  写入公证票据..."
-    xcrun stapler staple "$APP_DIR"
-
-    echo "  验证公证..."
-    spctl --assess --type execute --verbose "$APP_DIR"
-    echo "  公证验证通过"
-
-    rm -f "$NOTARY_ZIP"
-fi
-
-# 6. 创建分发包 zip
-echo "[6/7] 创建分发包..."
 cd "$DIST_DIR"
-ditto -c -k --keepParent "$APP_DIR" "StockHelper-$APP_VERSION.zip"
-
-# 7. 生成 appcast.xml
-echo "[7/7] 生成 appcast.xml..."
-python "$SCRIPT_DIR/generate_appcast.py" "$DIST_DIR/StockHelper-$APP_VERSION.zip" "$APP_VERSION" "$DIST_DIR/appcast.xml"
+rm -f "StockHelper-${APP_VERSION}.zip"
+ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "StockHelper-${APP_VERSION}.zip"
 
 echo "构建完成: $APP_DIR"
-echo ""
-echo "下一步:"
-echo "  1. codesign --deep --strict --sign 'Developer ID Application: YOUR_NAME' '$APP_DIR'"
-echo "  2. xcrun notarytool submit 'StockHelper-$APP_VERSION.zip' --apple-id YOUR_ID --team-id TEAM_ID --wait"
-echo "  3. xcrun stapler staple '$APP_DIR'"
+echo "分发包: $DIST_DIR/StockHelper-${APP_VERSION}.zip"
