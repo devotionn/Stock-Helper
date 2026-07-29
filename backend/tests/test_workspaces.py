@@ -1,10 +1,13 @@
 """投研日期工作区与日历 API 测试。"""
-import base64
+from io import BytesIO
+
+from PIL import Image
 
 
-TINY_PNG = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZQmcAAAAASUVORK5CYII="
-)
+def _tiny_png() -> bytes:
+    buffer = BytesIO()
+    Image.new("RGB", (2, 2), color=(255, 0, 0)).save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 def _get_module(client, record_date: str, module_id: int):
@@ -113,7 +116,7 @@ def test_image_upload_does_not_invalidate_text_revision(client):
     original_revision = current["revision"]
     upload = client.post(
         "/api/workspaces/2026-07-30/modules/1/images",
-        files={"file": ("pixel.png", TINY_PNG, "image/png")},
+        files={"file": ("pixel.png", _tiny_png(), "image/png")},
     )
     assert upload.status_code == 200, upload.text
 
@@ -133,6 +136,7 @@ def test_image_upload_does_not_invalidate_text_revision(client):
 def test_calendar_only_marks_completed_analysis_as_analyzed(client):
     from app.database import get_db
 
+    client.get("/api/workspaces/2026-07-30")
     with get_db() as conn:
         conn.execute(
             "INSERT INTO analyses(combination, record_date, status) VALUES ('[0]', ?, 'failed')",
@@ -142,8 +146,11 @@ def test_calendar_only_marks_completed_analysis_as_analyzed(client):
         "/api/workspaces/calendar",
         params={"month": "2026-07"},
     ).json()
-    failed_day = next(item for item in failed_calendar["days"] if item["date"] == "2026-07-30")
+    failed_day = next(
+        item for item in failed_calendar["days"] if item["date"] == "2026-07-30"
+    )
     assert failed_day["analysis_count"] == 0
+    assert failed_day["status"] == "empty"
 
     with get_db() as conn:
         conn.execute(
