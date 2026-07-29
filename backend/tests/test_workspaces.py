@@ -1,4 +1,10 @@
 """投研日期工作区与日历 API 测试。"""
+import base64
+
+
+TINY_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZQmcAAAAASUVORK5CYII="
+)
 
 
 def _get_module(client, record_date: str, module_id: int):
@@ -87,6 +93,72 @@ def test_copy_workspace_skips_existing_and_excludes_review_modules(client):
     assert _get_module(client, "2026-07-30", 0)["text_content"] == "来源策略"
     assert _get_module(client, "2026-07-30", 1)["text_content"] == "目标已有内容"
     assert _get_module(client, "2026-07-30", 9)["text_content"] == ""
+
+
+def test_copy_rejects_source_with_only_empty_entries(client):
+    client.get("/api/workspaces/2026-07-28")
+    response = client.post(
+        "/api/workspaces/2026-07-30/copy",
+        json={
+            "source_date": "2026-07-28",
+            "module_ids": [0, 1],
+            "overwrite": False,
+        },
+    )
+    assert response.status_code == 404
+
+
+def test_image_upload_does_not_invalidate_text_revision(client):
+    current = _get_module(client, "2026-07-30", 1)
+    original_revision = current["revision"]
+    upload = client.post(
+        "/api/workspaces/2026-07-30/modules/1/images",
+        files={"file": ("pixel.png", TINY_PNG, "image/png")},
+    )
+    assert upload.status_code == 200, upload.text
+
+    save = client.put(
+        "/api/workspaces/2026-07-30/modules/1",
+        json={
+            "text_content": "上传图片后继续保存文字",
+            "display_title": "测试股票 000001",
+            "revision": original_revision,
+            "status": "draft",
+        },
+    )
+    assert save.status_code == 200, save.text
+    assert _get_module(client, "2026-07-30", 1)["image_count"] == 1
+
+
+def test_calendar_only_marks_completed_analysis_as_analyzed(client):
+    from app.database import get_db
+
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO analyses(combination, record_date, status) VALUES ('[0]', ?, 'failed')",
+            ("2026-07-30",),
+        )
+    failed_calendar = client.get(
+        "/api/workspaces/calendar",
+        params={"month": "2026-07"},
+    ).json()
+    failed_day = next(item for item in failed_calendar["days"] if item["date"] == "2026-07-30")
+    assert failed_day["analysis_count"] == 0
+
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO analyses(combination, record_date, status) VALUES ('[0]', ?, 'completed')",
+            ("2026-07-30",),
+        )
+    completed_calendar = client.get(
+        "/api/workspaces/calendar",
+        params={"month": "2026-07"},
+    ).json()
+    completed_day = next(
+        item for item in completed_calendar["days"] if item["date"] == "2026-07-30"
+    )
+    assert completed_day["analysis_count"] == 1
+    assert completed_day["status"] == "analyzed"
 
 
 def test_invalid_dates_are_rejected(client):
