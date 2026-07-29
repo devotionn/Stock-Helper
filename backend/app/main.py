@@ -17,7 +17,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.config import settings
 from app.database import get_db, init_database
 from app.routers import analysis, backup, combinations, history, modules, sys_settings, workspaces
-from app.time_dimension import init_time_dimension
 
 
 def get_frontend_dist() -> Path:
@@ -39,9 +38,6 @@ async def lifespan(_app: FastAPI):
     migration_backup = init_database()
     if migration_backup:
         print(f"[数据库] 升级完成，升级前备份：{migration_backup}")
-    migrated_date = init_time_dimension()
-    if migrated_date:
-        print(f"[数据库] 旧版模块数据已迁移到投研日期：{migrated_date}")
 
     with get_db() as conn:
         conn.execute(
