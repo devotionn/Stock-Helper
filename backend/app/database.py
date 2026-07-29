@@ -225,7 +225,8 @@ def _ensure_common_indexes(conn: sqlite3.Connection) -> None:
         try:
             conn.execute(sql)
         except sqlite3.OperationalError as exc:
-            if "no such table" not in str(exc).lower() and "no such column" not in str(exc).lower():
+            message = str(exc).lower()
+            if "no such table" not in message and "no such column" not in message:
                 raise
 
 
@@ -300,6 +301,11 @@ def _migration_5(conn: sqlite3.Connection) -> None:
         "module_versions",
         "module_entry_id",
         "module_entry_id INTEGER",
+    )
+    # 极早期数据库的 settings 表只有 key/value；先修复结构再写入日期设置。
+    _add_column_if_missing(conn, "settings", "updated_at", "updated_at TEXT")
+    conn.execute(
+        "UPDATE settings SET updated_at=COALESCE(updated_at, datetime('now','localtime'))"
     )
 
     workspace_date = _legacy_workspace_date(conn)
@@ -414,15 +420,18 @@ def _schema_needs_repair(path: Path) -> bool:
             _column_names(conn, "module_versions")
         ):
             return True
+        if "updated_at" not in _column_names(conn, "settings"):
+            return True
         if "image_order_index" not in _column_names(conn, "analysis_assets"):
             return True
         required_indexes = {
             "idx_module_entries_date",
             "idx_entry_assets_entry",
         }
-        if not required_indexes.issubset(
-            _index_names(conn, "module_entries") | _index_names(conn, "entry_assets")
-        ):
+        actual_indexes = _index_names(conn, "module_entries") | _index_names(
+            conn, "entry_assets"
+        )
+        if not required_indexes.issubset(actual_indexes):
             return True
         return "idx_draft_assets_unique" not in _index_names(conn, "draft_assets")
     finally:
