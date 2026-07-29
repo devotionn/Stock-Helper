@@ -64,6 +64,7 @@ jobs:
           # 仅用于编译和 Info.plist 结构测试；正式版必须使用项目自己的真实公钥。
           SPARKLE_PUBLIC_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
           GITHUB_API_TOKEN: ${{ github.token }}
+          TEST_KEYCHAIN: '1'
         run: |
           chmod +x packaging/macos/build_app.sh packaging/macos/smoke_test.sh
           packaging/macos/build_app.sh
