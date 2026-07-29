@@ -108,6 +108,8 @@ jobs:
           packaging/macos/build_app.sh
 
       - name: 最终产物冒烟测试
+        env:
+          TEST_KEYCHAIN: '1'
         run: |
           chmod +x packaging/macos/smoke_test.sh
           packaging/macos/smoke_test.sh "dist/股票分析助手.app" "${{ steps.version.outputs.clean }}"
