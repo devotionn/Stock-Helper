@@ -1,0 +1,205 @@
+/*
+ * 月历无障碍增强：为老年用户提供高对比背景、粗边框、状态色条和文字状态。
+ * 不只依赖颜色区分，避免浅色背景及色觉差异造成误判。
+ */
+
+.calendar-card .calendar-day {
+  position: relative;
+  border-width: 2px !important;
+  color: #111827 !important;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+/* 尚未录入：中性灰，明确表示“没有内容”，但不使用禁用态的低对比效果。 */
+.calendar-card .calendar-day.empty {
+  background: #f3f4f6 !important;
+  border-color: #9ca3af !important;
+  box-shadow: inset 7px 0 0 #6b7280;
+}
+
+/* 部分完成：高辨识度琥珀色，避免过浅的米白色。 */
+.calendar-card .calendar-day.partial {
+  background: #ffedb3 !important;
+  border-color: #b45309 !important;
+  box-shadow: inset 7px 0 0 #d97706;
+}
+
+/* 全部完成：清晰的绿色完成态。 */
+.calendar-card .calendar-day.complete {
+  background: #c9f4d8 !important;
+  border-color: #15803d !important;
+  box-shadow: inset 7px 0 0 #16a34a;
+}
+
+/* 已分析：蓝色作为后续处理状态，与录入完成状态形成明确区分。 */
+.calendar-card .calendar-day.analyzed {
+  background: #cfe3ff !important;
+  border-color: #1d4ed8 !important;
+  box-shadow: inset 7px 0 0 #2563eb;
+}
+
+/* 用文字徽标再次表达状态，避免只依靠颜色。 */
+.calendar-card .calendar-day::after {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 27px;
+  margin-top: auto;
+  padding: 3px 8px;
+  border-radius: 6px;
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.calendar-card .calendar-day.empty::after {
+  content: "○ 尚未录入";
+  background: #4b5563;
+}
+
+.calendar-card .calendar-day.partial::after {
+  content: "◐ 部分完成";
+  background: #92400e;
+}
+
+.calendar-card .calendar-day.complete::after {
+  content: "✓ 全部完成";
+  background: #166534;
+}
+
+.calendar-card .calendar-day.analyzed::after {
+  content: "AI 已分析";
+  background: #1e40af;
+}
+
+.calendar-card .calendar-day-number {
+  min-width: 32px !important;
+  height: 32px !important;
+  font-size: 17px;
+  font-weight: 800 !important;
+}
+
+.calendar-card .calendar-day-progress {
+  color: #111827 !important;
+  font-size: 16px !important;
+  font-weight: 750;
+}
+
+/* 状态徽标已经显示“AI 已分析”，隐藏旧的小号重复文字。 */
+.calendar-card .calendar-analysis {
+  display: none !important;
+}
+
+/* 当前选择、键盘焦点、今天使用不同视觉符号，不与状态颜色混淆。 */
+.calendar-card .calendar-day.selected {
+  z-index: 1;
+  outline: 4px solid #111827 !important;
+  outline-offset: -4px !important;
+}
+
+.calendar-card .calendar-day:focus-visible {
+  z-index: 2;
+  outline: 4px solid #111827 !important;
+  outline-offset: 2px !important;
+}
+
+.calendar-card .calendar-day.today .calendar-day-number {
+  box-shadow: 0 0 0 2px #ffffff, 0 0 0 4px #1d4ed8;
+}
+
+/* 相邻月份仍要可读，只降低到 65%，避免老年用户看不清日期。 */
+.calendar-card .calendar-day.outside {
+  opacity: 0.65 !important;
+}
+
+.calendar-card .calendar-day:hover {
+  filter: brightness(0.96);
+}
+
+/* 图例同步增强，并补充“尚未录入”。 */
+.calendar-card .calendar-legend {
+  color: #111827 !important;
+  gap: 10px 16px !important;
+  font-size: 16px;
+  font-weight: 750;
+}
+
+.calendar-card .calendar-legend::before,
+.calendar-card .calendar-legend > span {
+  min-height: 34px;
+  padding: 5px 10px;
+  border: 2px solid #d1d5db;
+  border-radius: 7px;
+  background: #ffffff;
+  display: inline-flex;
+  align-items: center;
+}
+
+.calendar-card .calendar-legend::before {
+  content: "○ 尚未录入";
+  border-color: #6b7280;
+  background: #f3f4f6;
+}
+
+.calendar-card .legend-dot {
+  width: 18px !important;
+  height: 18px !important;
+  border-radius: 4px !important;
+  border: 2px solid transparent;
+  margin-right: 7px !important;
+}
+
+.calendar-card .legend-dot.partial {
+  background: #ffedb3 !important;
+  border-color: #b45309;
+}
+
+.calendar-card .legend-dot.complete {
+  background: #c9f4d8 !important;
+  border-color: #15803d;
+}
+
+.calendar-card .legend-dot.analyzed {
+  background: #cfe3ff !important;
+  border-color: #1d4ed8;
+}
+
+/* 顶部日期状态与月历使用同一套语义色。 */
+.workspace-status.empty {
+  background: #e5e7eb !important;
+  color: #1f2937 !important;
+  border: 2px solid #6b7280;
+}
+
+.workspace-status.partial {
+  background: #ffedb3 !important;
+  color: #78350f !important;
+  border: 2px solid #b45309;
+}
+
+.workspace-status.complete {
+  background: #c9f4d8 !important;
+  color: #14532d !important;
+  border: 2px solid #15803d;
+}
+
+.workspace-status.analyzed {
+  background: #cfe3ff !important;
+  color: #1e3a8a !important;
+  border: 2px solid #1d4ed8;
+}
+
+@media (max-width: 720px) {
+  .calendar-card .calendar-day::after {
+    min-height: 23px;
+    padding: 2px 5px;
+    font-size: 11px;
+  }
+
+  .calendar-card .calendar-day-progress {
+    font-size: 13px !important;
+  }
+}
